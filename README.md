@@ -22,7 +22,7 @@ TODO: implement the full WAL mechainisms to provide the same log-recovery semant
 This implementation employs an optimization to minimize the REMIX building cost.
 
 When creating a new table file, RemixDB can create a copy of all the keys in the table.
-Specificially, it encodes all the keys (without values) in sorted order using preifx compression, which creates a compressed keys block.
+Specificially, it encodes all the keys (without values) in sorted order using prefix compression, which creates a compressed keys block.
 The compressed keys block is stored at the end of the table file.
 This feature can be freely turned on and off. There is no compatibility issue when tables with and without the compressed keys block is used together.
 
