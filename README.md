@@ -17,12 +17,39 @@ Currently RemixDB performs a final compaction upon closing so all the data will 
 When a process running RemixDB crashes or gets killed, data buffered in the WAL will not be read.
 TODO: implement the full WAL mechainisms to provide the same log-recovery semantics of LevelDB.
 
+# Optimization: Minimizing REMIX (Re-)Building Cost
+
+This implementation employs an optimization to minimize the REMIX building cost.
+
+When creating a new table file, RemixDB can create a copy of all the keys in the table.
+Specificially, it encodes all the keys (without values) in sorted order using preifx compression, which creates a compressed keys block.
+The compressed keys block is stored at the end of the table file.
+This feature can be freely turned on and off. There is no compatibility issue when tables with and without the compressed keys block is used together.
+
+When creating a new REMIX, the building process will check if all the input tables contain such an compressed keys block.
+If true, the process will build the new REMIX using these blocks. It also leverages the existing REMIX to avoid unncecssary key comparisons.
+In this way, the new REMIX will be created by reading the old REMIX and the compressed keys blocks, without accessing the key-value data blocks of the table files.
+
+In a running system the old REMIX structures are usually cache-resident.
+The compressed keys block is only used for REMIX building, which are read into memory in batch, and discarded after the building is finished.
+
+An compressed keys block is often much smaller than the original key-value data block, unless the system manages huge keys with small values.
+Suppose the average compressed keys block size is 10% of the key-value data block,
+this optimization trades 10% more write I/O and storage space usage for a 90% reduction of read I/O during REMIX building.
+
+`remixdb_open` opens/creates a remixdb with the optimization turned on. New sstables will have the compressed keys block.
+You should use `remixdb_open` unless you're sure its absolutely necessary to save a little bit disk space.
+`remixdb_open_compact` opens a remixdb with the optimization turned off. New sstables will not have the compressed keys block.
+A store created by one of these functions can be safely opened by the other function.
+
+TODO: compress the compressed keys block with lz4/zstd/etc.?
+
 # Getting Started
 
 RemixDB by default uses `liburing` (`io_uring`) and thus requires a Linux kernel >= 5.1.
-It also works with POSIX AIO on all supported platforms but the performance can be affected.
+It also works with POSIX AIO on all the supported platforms but the performance can be negatively affected.
 
-`clang` is the default compiler. It usually produce faster code than GCC. To use GCC:
+`clang` is the default compiler. It usually produces faster code than GCC. To use GCC:
 
     $ make CCC=gcc
 
@@ -32,7 +59,6 @@ If jemalloc is available and you prefer to use it, use `M=j` with `make`:
 
 The `xdbdemo.c` contains sample code that uses the `remixdb_*` functions.
 These functions present a clean programming interface without using special data types or structures.
-
 
 ## xdbdemo
 To compile and run the demo code:
