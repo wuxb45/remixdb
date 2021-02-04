@@ -31,7 +31,7 @@ If true, the process will build the new REMIX using these blocks. It also levera
 In this way, the new REMIX will be created by reading the old REMIX and the compressed keys blocks, without accessing the key-value data blocks of the table files.
 
 In a running system the old REMIX structures are usually cache-resident.
-The compressed keys block is only used for REMIX building, which are read into memory in batch, and discarded after the building is finished.
+The compressed keys blocks are only used for REMIX building, which are read into memory in batch, and discarded once the building is finished.
 
 An compressed keys block is often much smaller than the original key-value data block, unless the system manages huge keys with small values.
 Suppose the average compressed keys block size is 10% of the key-value data block,
