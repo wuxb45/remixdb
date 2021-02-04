@@ -1,0 +1,182 @@
+#usage: include Makefile.common at the end of your Makefile
+
+# no builtin rules/vars (CC, CXX, etc. are still defined but will be empty)
+MAKEFLAGS += -r -R
+
+HDR = $(addsuffix .h,$(MODULES) $(HEADERS))
+SRC = $(addsuffix .c,$(MODULES) $(SOURCES))
+ASM = $(addsuffix .S,$(ASSMBLY))
+OBJ = $(addsuffix .o,$(MODULES) $(SOURCES) $(ASSEMBLY))
+DEP = Makefile $(HDR) $(EXTERNDEP) $(EXTERNSRC)
+BIN = $(addsuffix .out,$(TARGETS))
+DIS = $(addsuffix .dis,$(TARGETS))
+
+# clang:
+# EXTRA="-Rpass=loop-vectorize"  # IDs loops that were successfully V-ed
+# EXTRA="-Rpass-missed=loop-vectorize"  # IDs loops that failed V
+# EXTRA="-Rpass-analysis=loop-vectorize" # IDs the statements that caused V to fail
+# EXTRA="-Rpass=\ *" # remarks for all passes
+# other passes: https://llvm.org/docs/Passes.html
+
+O ?= rg
+
+# predefined OPT: make O={rg,r,0g,3g,p,0s,3s,cov,mc,hc,wn,stk}
+ifeq ($O,rg) # make O=rg
+OPT ?= -DNDEBUG -g3 -O3 -flto -fno-stack-protector
+else ifeq ($O,r) # make O=r (for release)
+OPT ?= -DNDEBUG -O3 -flto -fno-stack-protector
+else ifeq ($O,ns) # make O=ns (no signal handlers)
+OPT ?= -DNDEBUG -O3 -flto -fno-stack-protector -DNOSIGNAL
+else ifeq ($O,0g) # make O=0g
+OPT ?= -g3 -O0 -fno-inline
+else ifeq ($O,2g) # make O=2g
+OPT ?= -g3 -O2
+else ifeq ($O,3g) # make O=3g
+OPT ?= -g3 -O3 -flto -fno-inline
+else ifeq ($O,p) # make O=p (profiling: rg+noinline)
+OPT ?= -DNDEBUG -g3 -O3 -flto -fno-stack-protector -fno-inline
+else ifeq ($O,0s) # make O=0s (address sanitizer)
+OPT ?= -g3 -O0 -fno-inline -fsanitize=address -fno-omit-frame-pointer -DHEAPCHECKING
+else ifeq ($O,3s) # make O=3s (address sanitizer)
+OPT ?= -g3 -O3 -fno-inline -fsanitize=address -fno-omit-frame-pointer -DHEAPCHECKING
+else ifeq ($O,cov) # make O=cov (for gcov)
+OPT ?= -g3 -DNDEBUG -O0 --coverage
+CCC = gcc
+else ifeq ($O,mc) # make O=mc (for valgrind memcheck)
+OPT ?= -g3 -O1 -fno-inline -DHEAPCHECKING
+ARCH ?= broadwell
+else ifeq ($O,hc) # make O=hc (for gperftools heapcheck)
+OPT ?= -g3 -O1 -fno-inline
+LIB += tcmalloc
+else ifeq ($O,wn) # more warning
+OPT ?= -g3 -O3 -Wvla -Wformat=2 -Wconversion -Wstrict-prototypes -Wmissing-prototypes
+else ifeq ($O,stk) # check stack usage with gcc
+OPT ?= -g3 -O3 -DNDEBUG -fstack-usage
+CCC = gcc
+endif
+
+# malloc: g:glibc, t:tcmalloc, j:jemalloc
+M ?= g
+
+ifeq ($M,t)
+  LIB += tcmalloc
+  FLG += -fno-builtin-malloc -fno-builtin-calloc -fno-builtin-realloc -fno-builtin-free
+else ifeq ($M,j)
+  LIB += jemalloc
+endif
+
+UNAME_S := $(shell uname -s)
+ifeq ($(UNAME_S),Linux)
+  LIB += rt
+  LIB += uring
+else ifeq ($(UNAME_S),FreeBSD)
+  LIB += rt
+  LIB += execinfo
+  TPUT := /usr/local/bin/tput
+else ifeq ($(UNAME_S),Darwin)
+  # do nothing
+else
+  # TODO
+endif
+TPUT ?= tput
+
+CCC ?= clang
+CSTD = -std=gnu18
+XCC ?= clang++
+XSTD = -std=gnu++17
+
+ISA := $(shell uname -m)
+ifeq ($(ISA),aarch64) # "native" does not work for clang@aarch64
+ARCH ?= armv8-a+crc
+else
+ARCH ?= native
+endif
+
+TUNE ?= native
+
+NBI += memcpy memmove memcmp
+
+# minimal requirement on x86_64: -march=nehalem
+# minimal requirement on aarch64: -march=armv8-a+crc
+FLG += -march=$(ARCH) -mtune=$(TUNE)
+FLG += -pthread -Wall -Wextra -Wshadow #-Weverything
+FLG += $(addprefix -fno-builtin-,$(NBI))
+FLG += $(OPT)
+
+ifeq ($(CCC),clang)
+FLG += -ferror-limit=3
+else ifeq ($(CCC),gcc)
+FLG += -fmax-errors=3
+FLG += -Wno-unknown-pragmas
+endif
+
+uniq = $(if $1,$(firstword $1) $(call uniq,$(filter-out $(firstword $1),$1)))
+magentatxt := $(shell $(TPUT) setaf 5)
+greentxt := $(shell $(TPUT) setaf 2)
+bluetxt := $(shell $(TPUT) setaf 4)
+normaltxt := $(shell $(TPUT) sgr0)
+
+.PHONY : bin dis clean cleanx check tags
+
+bin : $(BIN)
+dis : $(DIS) bin
+.DEFAULT_GOAL = bin
+.SECONDEXPANSION:
+
+ifeq ($(J),o)
+# DANGER. Don't use unless it works!
+# build from .o files but target-specific flags are missing in %.o : %.x
+%.out : %.o $(OBJ) $$(addsuffix .o,$$(SRC-$$@) $$(MOD-$$@) $$(ASM-$$@))
+	$(eval ALLFLG := $(CSTD) $(EXTRA) $(FLG) $(FLG-$*) $(FLG-$*.o) $(FLG-$@) -rdynamic)
+	$(eval ALLLIB := $(addprefix -l,$(LIB) $(LIB-$@)))
+	$(CCC) $(ALLFLG) -o $@ $^ $(ALLLIB)
+#
+else # default: all-in-one command
+%.out : %.c $(SRC) $(ASM) $(DEP) $$(DEP-$$@) $$(addsuffix .c,$$(SRC-$$@) $$(MOD-$$@)) $$(addsuffix .h,$$(HDR-$$@) $$(MOD-$$@)) $$(addsuffix .S,$$(ASM-$$@))
+	$(eval ALLSRC := $(SRC) $(addsuffix .c,$(SRC-$@) $(MOD-$@)) $(ASM) $(addsuffix .S,$(ASM-$@)))
+	$(eval UNIQSRC := $(call uniq,$(ALLSRC)))
+	$(eval ALLFLG := $(CSTD) $(EXTRA) $(FLG) $(FLG-$@) -rdynamic)
+	$(eval ALLLIB := $(addprefix -l,$(LIB) $(LIB-$@)))
+	@printf '$(bluetxt)$@$(magentatxt) <= $(greentxt)$< $(UNIQSRC)$(normaltxt)\n'
+	$(CCC) $(ALLFLG) -o $@ $< $(UNIQSRC) $(ALLLIB)
+#
+endif
+
+
+%.dis : %.out
+	objdump -SlwTC $< 1> $@ 2>/dev/null
+
+%.o : %.cc $(DEP) $$(DEP-$$@) $$(addsuffix .h,$$(HDR-$$@) $$(MOD-$$@))
+	$(XCC) $(XSTD) $(EXTRA) $(FLG) $(FLG-$*) $(FLG-$@) -o $@ -c $<
+
+%.o : %.c $(DEP) $$(DEP-$$@) $$(addsuffix .h,$$(HDR-$$@) $$(MOD-$$@))
+	$(CCC) $(CSTD) $(EXTRA) $(FLG) $(FLG-$*) $(FLG-$@) -o $@ -c $<
+
+%.o : %.S $(DEP) $$(DEP-$$@) $$(addsuffix .h,$$(HDR-$$@) $$(MOD-$$@))
+	$(CCC) $(CSTD) $(EXTRA) $(FLG) $(FLG-$*) $(FLG-$@) -o $@ -c $<
+
+%.s : %.c $(DEP) $$(DEP-$$@) $$(addsuffix .h,$$(HDR-$$@) $$(MOD-$$@))
+	$(CCC) $(CSTD) $(EXTRA) $(FLG) $(FLG-$*) $(FLG-$*.o) -S -o $@ -c $<
+
+clean :
+	rm -rf *.out *.dis *.o *.so *.gcda *.gcno *.gcov *.dSYM
+
+cleanx : clean
+	rm -rf $(EXTERNDEP) $(EXTERNSRC)
+
+ifeq ($(CCC),gcc)
+  CCINST = /usr/lib/gcc/$(shell gcc -dumpmachine)/$(shell gcc -dumpversion)
+  CCINC = $(CCINST)/include $(CCINST)/include-fixed
+else ifeq ($(CCC),clang)
+  CCINST = /usr/lib/clang/$(shell clang --version | awk '/^clang/ { print $$3 }')
+  CCINC = $(CCINST)/include
+endif
+
+check :
+	cppcheck -I /usr/include -I /usr/local/include $(addprefix -I ,$(CCINC)) \
+    -q -D__x86_64__=1 -DNDEBUG -U__cplusplus \
+    --std=c11 --language=c --platform=unix64 \
+    --enable=warning,style,performance,portability,information --inline-suppr .
+
+tags :
+	ctags -R . /usr/include /usr/local/include $(CCINC)
