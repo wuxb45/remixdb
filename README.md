@@ -1,7 +1,6 @@
 # REMIX and RemixDB
 
-The REMIX data structure was introduced in paper ["REMIX: Efficient Range Query for LSM-trees", FAST'21]
-(https://www.usenix.org/conference/fast21/presentation/zhong).
+The REMIX data structure was introduced in paper ["REMIX: Efficient Range Query for LSM-trees", FAST'21](https://www.usenix.org/conference/fast21/presentation/zhong).
 
 This repository maintains a reference implementation of the REMIX index data structure,
 as well as a thread-safe embedded key-value store implementation, namely RemixDB.
@@ -16,12 +15,9 @@ TODO: store every huge value in a separate file and recording the file name as t
 * *WAL recovery*: The log-recovery process has not been implemented.
 Currently RemixDB performs a final compaction upon closing so all the data will be available when it gets reopened.
 When a process running RemixDB crashes or gets killed, data buffered in the WAL will not be read.
-TODO: implement the full WAL mechainisms to provide the same crash-recovery semantics of LevelDB.
+TODO: implement the full WAL mechainisms to provide the same log-recovery semantics of LevelDB.
 
 # Getting Started
-
-The `xdbdemo.c` contains sample code that uses the `remixdb_*` functions.
-These functions present a clean programming interface without using special data types or structures.
 
 RemixDB by default uses `liburing` (`io_uring`) and thus requires a Linux kernel >= 5.1.
 It also works with POSIX AIO on all supported platforms but the performance can be affected.
@@ -30,17 +26,18 @@ It also works with POSIX AIO on all supported platforms but the performance can 
 
     $ make CCC=gcc
 
-## xdbdemo
-To compile the demo code:
-
-    $ make xdbdemo.out
-
 If jemalloc is available and you prefer to use it, use `M=j` with `make`:
 
-    $ make M=j xdbdemo.out
+    $ make M=j
 
-To run the demo program:
+The `xdbdemo.c` contains sample code that uses the `remixdb_*` functions.
+These functions present a clean programming interface without using special data types or structures.
 
+
+## xdbdemo
+To compile and run the demo code:
+
+    $ make xdbdemo.out
     $ ./xdbdemo.out
 
 ## xdbtest
