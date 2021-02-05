@@ -127,7 +127,7 @@ cpu_pause(void)
 #if defined(__x86_64__)
   _mm_pause();
 #elif defined(__aarch64__)
-  __yield();
+  // nop
 #endif
 }
 
@@ -2814,7 +2814,7 @@ strhex_32(void * const out, u32 v)
   _mm_storel_epi64(out, _mm_srli_si128(str, 8));
 #elif defined(__aarch64__)
   const m128 str = strhex_helper((u64)v);
-  vst1q_lane_u64(out, str, 1);
+  vst1q_lane_u64(out, vreinterpretq_u64_u8(str), 1);
 #else
   u16 * const ptr = (typeof(ptr))out;
   for (u64 i = 0; i < 4; i++) {
