@@ -35,8 +35,23 @@ LIB += m
 
 
 #### all
-TGT-all += $(TARGETS)
 .PHONY : all
+all : bin libremixdb.so sotest.out
+
+libremixdb.so : Makefile Makefile.common lib.h kv.h wh.h blkio.h sst.h xdb.h lib.c kv.c wh.c blkio.c sst.c xdb.c
+	$(eval ALLFLG := $(CSTD) $(EXTRA) $(FLG) -shared -fPIC)
+	$(eval ALLLIB := $(addprefix -l,$(LIB) $(LIB-$@)))
+	$(CCC) $(ALLFLG) -o $@ lib.c kv.c wh.c blkio.c sst.c xdb.c $(ALLLIB)
+
+sotest.out : sotest.c Makefile Makefile.common libremixdb.so remixdb.h
+	$(eval ALLFLG := $(CSTD) $(EXTRA) $(FLG))
+	$(CCC) $(ALLFLG) -o $@ $< -L . -lremixdb
+	@echo "$(shell $(TPUT) setaf 4)Now run $ LD_LIBRARY_PATH=. ./sotest.out$(shell $(TPUT) sgr0)"
+
+.PHONY : install
+install : libremixdb.so remixdb.h
+	install -D --mode=0755 libremixdb.so $(PREFIX)/lib/libremixdb.so
+	install -D --mode=0644 remixdb.h $(PREFIX)/usr/include/remixdb.h
 
 # append common rules (have to do it here)
 include Makefile.common
