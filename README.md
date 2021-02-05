@@ -10,7 +10,7 @@ It compiles on recent Linux/FreeBSD/MacOS and supports x86\_64 and AArch64 CPUs.
 
 * *KV size*: The maximum key+value size is capped at 65500 bytes.
 This roughly corresponds to the 64KB block size limit.
-TODO: store every huge value in a separate file and recording the file name as the value of the KV pair in RemixDB.
+TODO: store every huge value in a separate file and record the file name as the value of the KV pair in RemixDB.
 
 * *WAL recovery*: The log-recovery process has not been implemented.
 Currently RemixDB performs a final compaction upon closing so all the data will be available when it gets reopened.
