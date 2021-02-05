@@ -34,7 +34,7 @@ In a running system the old REMIX structures are usually cache-resident.
 The CKBs are only used for REMIX building, which are read into memory in batch, and discarded once the building is finished.
 
 A CKB is often much smaller than the original key-value data block, unless the system manages huge keys with small values.
-Suppose the average CKB size is 10% of the key-value data block,
+Suppose the average CKB size is 10% of the average key-value data block size,
 this optimization trades 10% more write I/O and storage space usage for a 90% reduction of read I/O during REMIX building.
 
 `remixdb_open` opens/creates a remixdb with the optimization turned on. Each newly created sstable will have the CKB.
