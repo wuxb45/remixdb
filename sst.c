@@ -2969,9 +2969,12 @@ msstbc_sync_rank(struct msstb * const b)
     b->tmp0 = b->tmp1;
     b->tmp1 = xchg;
     struct kref cref;
-    sstc_iter_kref(citer, &cref);
-    b->tmp1->klen = cref.len;
-    memcpy(b->tmp1->kv, cref.ptr, cref.len); // hash is ignored
+    if (sstc_iter_kref(citer, &cref)) {
+      b->tmp1->klen = cref.len;
+      memcpy(b->tmp1->kv, cref.ptr, cref.len); // hash is ignored
+    } else {
+      debug_die();
+    }
   }
 }
 
