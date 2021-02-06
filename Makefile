@@ -42,6 +42,7 @@ libremixdb.so : Makefile Makefile.common lib.h kv.h wh.h blkio.h sst.h xdb.h lib
 	$(eval ALLFLG := $(CSTD) $(EXTRA) $(FLG) -shared -fPIC)
 	$(eval ALLLIB := $(addprefix -l,$(LIB) $(LIB-$@)))
 	$(CCC) $(ALLFLG) -o $@ lib.c kv.c wh.c blkio.c sst.c xdb.c $(ALLLIB)
+	strip --strip-all --discard-all @remixdb.strip $@
 
 sotest.out : sotest.c Makefile Makefile.common libremixdb.so remixdb.h
 	$(eval ALLFLG := $(CSTD) $(EXTRA) $(FLG))

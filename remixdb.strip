@@ -1,0 +1,16 @@
+-K remixdb_open
+-K remixdb_open_compact
+-K remixdb_close
+-K remixdb_ref
+-K remixdb_unref
+-K remixdb_set
+-K remixdb_del
+-K remixdb_get
+-K remixdb_probe
+-K remixdb_iter_create
+-K remixdb_iter_destroy
+-K remixdb_iter_valid
+-K remixdb_iter_seek
+-K remixdb_iter_park
+-K remixdb_iter_peek
+-K remixdb_iter_skip
