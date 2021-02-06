@@ -386,7 +386,6 @@ debug_init(void)
     }
   }
 }
-#endif // !defined(NOSIGNAL)
 
 __attribute__((destructor))
   static void
@@ -399,6 +398,7 @@ debug_exit(void)
   if (oss.ss_sp)
     pages_unmap(oss.ss_sp, PGSZ * 16);
 }
+#endif // !defined(NOSIGNAL)
 
   void
 debug_dump_maps(FILE * const out)
