@@ -68,7 +68,6 @@ endif
 UNAME_S := $(shell uname -s)
 ifeq ($(UNAME_S),Linux)
   LIB += rt
-  LIB += uring
 else ifeq ($(UNAME_S),FreeBSD)
   LIB += rt
   LIB += execinfo
@@ -109,6 +108,26 @@ else ifeq ($(CCC),gcc)
 FLG += -fmax-errors=3
 FLG += -Wno-unknown-pragmas
 endif
+
+ifeq ($(CCC),clang)
+  CCINST = /usr/lib/clang/$(shell clang --version | awk '/^clang/ { print $$3 }')
+  CCINC = $(CCINST)/include
+else ifeq ($(CCC),gcc)
+  CCINST = /usr/lib/gcc/$(shell gcc -dumpmachine)/$(shell gcc -dumpversion)
+  CCINC = $(CCINST)/include $(CCINST)/include-fixed
+endif
+CCINC = /usr/include /usr/local/include
+
+ifneq ($(shell find $(CCINC) -name backtrace-supported.h),)
+  LIB += backtrace
+  FLG += -DBACKTRACE
+endif
+
+ifneq ($(shell find $(CCINC) -name liburing.h),)
+  LIB += uring
+  FLG += -DLIBURING
+endif
+
 
 uniq = $(if $1,$(firstword $1) $(call uniq,$(filter-out $(firstword $1),$1)))
 magentatxt := $(shell $(TPUT) setaf 5)
@@ -164,16 +183,8 @@ clean :
 cleanx : clean
 	rm -rf $(EXTERNDEP) $(EXTERNSRC)
 
-ifeq ($(CCC),gcc)
-  CCINST = /usr/lib/gcc/$(shell gcc -dumpmachine)/$(shell gcc -dumpversion)
-  CCINC = $(CCINST)/include $(CCINST)/include-fixed
-else ifeq ($(CCC),clang)
-  CCINST = /usr/lib/clang/$(shell clang --version | awk '/^clang/ { print $$3 }')
-  CCINC = $(CCINST)/include
-endif
-
 check :
-	cppcheck -I /usr/include -I /usr/local/include $(addprefix -I ,$(CCINC)) \
+	cppcheck $(addprefix -I ,$(CCINC)) \
     -q -D__x86_64__=1 -DNDEBUG -U__cplusplus \
     --std=c11 --language=c --platform=unix64 \
     --enable=warning,style,performance,portability,information --inline-suppr .

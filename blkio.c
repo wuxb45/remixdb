@@ -13,10 +13,10 @@
 #include <assert.h>
 #include <aio.h>
 
-#if defined(__linux__)
+#if defined(LIBURING)
 #define BLKIO_URING
 #include <liburing.h>
-#endif // __linux__
+#endif // URING
 
 // }}} include
 

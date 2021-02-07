@@ -291,16 +291,66 @@ watch_u64_usr1(u64 * const ptr)
   }
 }
 
+static void * debug_bt_state = NULL;
+#if defined(BACKTRACE) && defined(__linux__)
+// TODO: get exec path on MacOS and FreeBSD
+
+#include <backtrace.h>
+static char debug_filepath[1024] = {};
+
+  static void
+debug_bt_error_cb(void * const data, const char * const msg, const int errnum)
+{
+  (void)data;
+  dprintf(2, "libbacktrace: %s %s\n", msg, strerror(errnum));
+}
+
+  static int
+debug_bt_print_cb(void * const data, const uintptr_t pc,
+    const char * const file, const int lineno, const char * const func)
+{
+  u32 * const plevel = (typeof(plevel))data;
+  if (file || func || lineno) {
+    dprintf(2, "[%u]0x%012lx " TERMCLR(35) "%s" TERMCLR(31) ":" TERMCLR(34) "%d" TERMCLR(0)" %s\n",
+        *plevel, pc, file ? file : "???", lineno, func ? func : "???");
+  } else if (pc) {
+    dprintf(2, "[%u]0x%012lx\n", *plevel, pc);
+  }
+  (*plevel)++;
+  return strcmp(func, "main") == 0;
+}
+
+__attribute__((constructor))
+  static void
+debug_backtrace_init(void)
+{
+  const ssize_t len = readlink("/proc/self/exe", debug_filepath, 1023);
+  // disable backtrace
+  if (len < 0 || len >= 1023)
+    return;
+
+  debug_filepath[len] = '\0';
+  debug_bt_state = backtrace_create_state(debug_filepath, 1, debug_bt_error_cb, NULL);
+}
+#endif // BACKTRACE
+
   static void
 debug_wait_gdb(void)
 {
-  void *array[64];
-  const int size = backtrace(array, 64);
-  dprintf(2, "Backtrace (%d):\n", size);
-  backtrace_symbols_fd(array + 1, size, 2);
+  if (debug_bt_state) {
+#if defined(BACKTRACE)
+    dprintf(2, "Backtrace :\n");
+    u32 level = 0;
+    backtrace_full(debug_bt_state, 1, debug_bt_print_cb, debug_bt_error_cb, &level);
+#endif // BACKTRACE
+  } else { // fallback to execinfo if no backtrace or initialization failed
+    void *array[64];
+    const int size = backtrace(array, 64);
+    dprintf(2, "Backtrace (%d):\n", size - 1);
+    backtrace_symbols_fd(array + 1, size - 1, 2);
+  }
 
   abool v = true;
-
   char timestamp[32];
   time_stamp(timestamp, 32);
   char threadname[32] = {};
