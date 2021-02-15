@@ -124,7 +124,7 @@ sst_iter_destroy(struct sst_iter * const iter);
 // api contains sorted keys and supports iter_next().
 // all keys in the map_api will be added to the sstable.
   extern u64
-sst_build(struct miter * const miter, const char * const dirname,
+sst_build(const char * const dirname, struct miter * const miter,
     const u64 seq, const u32 way, const u32 maxblkid0, const bool del, const bool ckeys,
     const struct kv * const k0, const struct kv * const kz);
 // }}} build-sst
@@ -208,7 +208,7 @@ struct mssty_ref;
 struct mssty_iter;
 
   extern bool
-mssty_open_y(struct msst * const msst, const char * const dirname);
+mssty_open_y(const char * const dirname, struct msst * const msst);
 
   extern struct msst *
 mssty_open(const char * const dirname, const u64 seq, const u32 nway);
@@ -328,7 +328,7 @@ mssty_dump(struct msst * const msst, const char * const fn);
 // build extended metadata based on a set of sstables.
 // y0 and way0 are optional for speeding up the sorting
   extern u32
-ssty_build(struct msst * const msst, const char * const dirname,
+ssty_build(const char * const dirname, struct msst * const msst,
     const u64 seq, const u32 way, struct msst * const y0, const u32 way0);
 // }}} build-ssty
 
@@ -348,9 +348,6 @@ msstv_rcache(struct msstv * const v, struct rcache * const rc);
 
   extern void
 msstv_destroy(struct msstv * const v);
-
-  extern bool
-msstv_save(struct msstv * const v, const char * const dirname);
 
   extern struct msstv *
 msstv_open(const char * const dirname, const char * const filename);
@@ -464,6 +461,9 @@ msstz_stat_reads(struct msstz * const z);
 // default is 0
   extern void
 msstz_set_minsz(struct msstz * const z, const u64 minsz);
+
+  extern u64
+msstz_version(struct msstz * const z);
 
   extern struct msstv *
 msstz_getv(struct msstz * const z);

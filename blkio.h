@@ -18,10 +18,18 @@ struct wring;
 wring_create(const int fd, const size_t iosz, const u32 depth);
 
   extern void
+wring_update_fd(struct wring * const wring, const int fd);
+
+  extern void
 wring_destroy(struct wring * const wring);
 
   extern void *
 wring_acquire(struct wring * const wring);
+
+// write part of the buf
+  extern void
+wring_write_partial(struct wring * const wring, const size_t off,
+    void * const buf, const size_t buf_off, const size_t size);
 
   extern void
 wring_write(struct wring * const wring, const size_t off, void * const buf);

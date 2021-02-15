@@ -99,6 +99,17 @@ wring_create(const int fd, const size_t iosz, const u32 depth0)
 }
 
   void
+wring_update_fd(struct wring * const wring, const int fd)
+{
+  wring->fd = fd;
+  if (wring->fixed_file) {
+    const int r = io_uring_register_files_update(&wring->uring, 0, &wring->fd, 1);
+    if (r != 1)
+      wring->fixed_file = false;
+  }
+}
+
+  void
 wring_destroy(struct wring * const wring)
 {
   wring_flush(wring);
@@ -201,8 +212,10 @@ wring_wait_slot(struct wring * const wring)
 
 // write a 4kB page
   void
-wring_write(struct wring * const wring, const size_t off, void * const buf)
+wring_write_partial(struct wring * const wring, const size_t off,
+    void * const buf, const size_t buf_off, const size_t size)
 {
+  debug_assert((buf_off + size) <= wring->iosz);
   //debug_assert(wring->nring < wring->depth);
 #if defined(BLKIO_URING)
   struct io_uring_sqe * const sqe = io_uring_get_sqe(&wring->uring);
@@ -210,9 +223,9 @@ wring_write(struct wring * const wring, const size_t off, void * const buf)
 
   const int fd = wring->fixed_file ? 0 : wring->fd;
   if (wring->fixed_mem) {
-    io_uring_prep_write_fixed(sqe, fd, buf, wring->iosz, off, 0);
+    io_uring_prep_write_fixed(sqe, fd, buf + buf_off, size, off, 0);
   } else {
-    io_uring_prep_write(sqe, fd, buf, wring->iosz, off);
+    io_uring_prep_write(sqe, fd, buf + buf_off, size, off);
   }
 
   if (wring->fixed_file)
@@ -229,8 +242,8 @@ wring_write(struct wring * const wring, const size_t off, void * const buf)
   const u32 i = wring->off_submit & wring->off_mask;
   struct aiocb * const cb = &wring->aring[i].aiocb;
   cb->aio_fildes = wring->fd;
-  cb->aio_buf = buf;
-  cb->aio_nbytes = wring->iosz;
+  cb->aio_buf = buf + buf_off;
+  cb->aio_nbytes = size;
   cb->aio_offset = off;
   wring->aring[i].data = buf;
   const int r = aio_write(cb);
@@ -239,6 +252,12 @@ wring_write(struct wring * const wring, const size_t off, void * const buf)
 
   wring->off_submit++;
 #endif // BLKIO_URING
+}
+
+  inline void
+wring_write(struct wring * const wring, const size_t off, void * const buf)
+{
+  wring_write_partial(wring, off, buf, 0, wring->iosz);
 }
 
   static bool

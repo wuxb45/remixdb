@@ -10,7 +10,7 @@
 # X.out : xyz.h xyz.c # for extra dependences that are to be compiled/linked.
 
 # X => X.out
-TARGETS += xdbdemo xdbtest
+TARGETS += xdbdemo xdbtest xdbexit
 # X => X.c only
 SOURCES +=
 SOURCES += $(EXTRASRC)

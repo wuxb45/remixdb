@@ -12,11 +12,6 @@ It compiles on recent Linux/FreeBSD/MacOS and supports x86\_64 and AArch64 CPUs.
 This roughly corresponds to the 64KB block size limit.
 TODO: store every huge value in a separate file and record the file name as the value of the KV pair in RemixDB.
 
-* *WAL recovery*: The log-recovery process has not been implemented.
-Currently RemixDB performs a final compaction upon closing so all the data will be available when it gets reopened.
-When a process running RemixDB crashes or gets killed, data buffered in the WAL will not be read.
-TODO: implement the full WAL mechainisms to provide the same log-recovery semantics of LevelDB.
-
 # Optimization: Minimizing REMIX (Re-)Building Cost
 
 This implementation employs an optimization to minimize the REMIX building cost.
@@ -82,3 +77,13 @@ If your memory (tmpfs) is small (a 256MB block cache, 256MB Memtables, and 1 mil
 
 The first run of xdbtest.out should always show errors=0.
 If you run it again without deleting `/tmp/xdbtest`, it will show non-zero error counts but the count will quickly drop and eventually reach zero.
+
+## xdbexit
+
+`xdbexit` is a simple program testing crash-recovery. Run it repeatedly. In each run it should show that all the previously inserted KVs are found.
+Internally, it inserts some new keys and calls `remixdb_sync()` to make all buffered data persist in the WAL. Then it just call `exit()` without any clean up.
+
+## libremixdb.so
+
+To use remixdb as a shared library, run `make libremixdb.so` and `make install`.
+A PKGBUILD (for Archliunx's pacman) is included as an example packaging script.

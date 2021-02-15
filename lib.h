@@ -451,9 +451,17 @@ bits_round_down(const u64 v, const u8 power);
 
   extern u64
 bits_round_down_a(const u64 v, const u64 a);
+// }}} bits
 
+// vi128 {{{
   extern u32
 vi128_estimate_u32(const u32 v);
+
+  extern u8 *
+vi128_encode_u32(u8 * dst, u32 v);
+
+  extern const u8 *
+vi128_decode_u32(const u8 * src, u32 * const out);
 
   extern u32
 vi128_estimate_u64(const u64 v);
@@ -461,15 +469,9 @@ vi128_estimate_u64(const u64 v);
   extern u8 *
 vi128_encode_u64(u8 * dst, u64 v);
 
-  extern u8 *
-vi128_encode_u32(u8 * dst, u32 v);
-
   extern const u8 *
 vi128_decode_u64(const u8 * src, u64 * const out);
-
-  extern const u8 *
-vi128_decode_u32(const u8 * src, u32 * const out);
-// }}} bits
+// }}} vi128
 
 // misc {{{
   extern void *

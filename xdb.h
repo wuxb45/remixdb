@@ -42,6 +42,9 @@ xdb_set(struct xdb_ref * const ref, const struct kv * const kv);
   extern bool
 xdb_del(struct xdb_ref * const ref, const struct kref * const kref);
 
+  extern void
+xdb_sync(struct xdb_ref * const ref);
+
 // iter
   extern struct xdb_iter *
 xdb_iter_create(struct xdb_ref * const ref);
@@ -105,6 +108,9 @@ remixdb_probe(struct xdb_ref * const ref, const void * const kbuf, const u32 kle
   extern bool
 remixdb_get(struct xdb_ref * const ref, const void * const kbuf, const u32 klen,
     void * const vbuf_out, u32 * const vlen_out);
+
+  extern void
+remixdb_sync(struct xdb_ref * const ref);
 
   extern struct xdb_iter *
 remixdb_iter_create(struct xdb_ref * const ref);

@@ -44,6 +44,9 @@ remixdb_probe(struct xdb_ref * const ref, const void * const kbuf, const uint32_
 remixdb_get(struct xdb_ref * const ref, const void * const kbuf, const uint32_t klen,
     void * const vbuf_out, uint32_t * const vlen_out);
 
+  extern void
+remixdb_sync(struct xdb_ref * const ref);
+
   extern struct xdb_iter *
 remixdb_iter_create(struct xdb_ref * const ref);
 

@@ -32,7 +32,7 @@
 // 4 for 16; 5 for 32; TODO: 6 for 64
 #define SSTY_DBITS ((5))
 #define SSTY_DIST ((1u << SSTY_DBITS))
-static_assert(SSTY_DBITS >= 4 && SSTY_DBITS <= 5, "Supported SSTY_DBITS: 4,5; TODO: 6");
+static_assert(SSTY_DBITS >= 4 && SSTY_DBITS <= 5, "Supported SSTY_DBITS: 4 and 5; TODO: 6");
 
 #if defined(__linux__)
 #define SSTY_MMAP_FLAGS ((MAP_PRIVATE|MAP_POPULATE))
@@ -63,7 +63,7 @@ sst_kv_vi128_estimate(const struct kv * const kv)
   return vi128_estimate_u32(kv->klen) + vi128_estimate_u32(kv->vlen) + kv->klen + (kv->vlen & SST_VLEN_MASK);
 }
 
-  inline u8 *
+  u8 *
 sst_kv_vi128_encode(u8 * ptr, const struct kv * const kv)
 {
   ptr = vi128_encode_u32(ptr, kv->klen);
@@ -191,14 +191,12 @@ struct sst {
 };
 
   static bool
-sst_init(const char * const dirname, const u64 seq, const u32 way, struct sst * const sst)
+sst_init_at(const int dirfd, const u64 seq, const u32 way, struct sst * const sst)
 {
-  char * const fn = malloc(strlen(dirname) + 30);
+  char fn[24];
   const u64 magic = seq * 100lu + way;
-  sprintf(fn, "%s/%03lu.sstx", dirname, magic);
-  //const int fd = open(fn, O_RDONLY|O_DIRECT);
-  const int fd = open(fn, O_RDONLY);
-  free(fn);
+  sprintf(fn, "%03lu.sstx", magic);
+  const int fd = openat(dirfd, fn, O_RDONLY);
   if (fd < 0)
     return false;
 
@@ -246,18 +244,29 @@ sst_rcache(struct sst * const sst, struct rcache * const rc)
   sst->rc = rc;
 }
 
-  struct sst *
-sst_open(const char * const dirname, const u64 seq, const u32 way)
+  static struct sst *
+sst_open_at(const int dirfd, const u64 seq, const u32 way)
 {
   struct sst * const sst = yalloc(sizeof(*sst));
   if (sst == NULL)
     return NULL;
-  if (sst_init(dirname, seq, way, sst)) {
+  if (sst_init_at(dirfd, seq, way, sst)) {
     return sst;
   } else {
     free(sst);
     return NULL;
   }
+}
+
+  struct sst *
+sst_open(const char * const dirname, const u64 seq, const u32 way)
+{
+  const int dirfd = open(dirname, O_RDONLY|O_DIRECTORY);
+  if (dirfd < 0)
+    return NULL;
+  struct sst * const sst = sst_open_at(dirfd, seq, way);
+  close(dirfd);
+  return sst;
 }
 
   static inline u32
@@ -608,19 +617,22 @@ kvenc_destroy(struct kvenc * const enc)
 // }}} kvenc
 
 // sst_build {{{
+#define SST_BUILD_METASZ ((sizeof(u16) * 256 * 2))
+#define SST_BUILD_BUFSZ ((SST_BUILD_METASZ + SST_MAX_BLKSZ))
+#define SST_BUILD_NVEC ((16))
+
 // from k0 (inclusive) to kz (exclusive)
 // warning: all iters in miter must handle the tombstone (vlen >= SST_VLEN_TS)
 // return the output file size (in bytes)
-  u64
-sst_build(struct miter * const miter, const char * const dirname,
+  static u64
+sst_build_at(const int dirfd, struct miter * const miter,
     const u64 seq, const u32 way, const u32 maxblks, const bool del, const bool ckeys,
     const struct kv * const k0, const struct kv * const kz)
 {
-  char * const fn = malloc(strlen(dirname) + 30);
+  char fn[24];
   const u64 magic = seq * 100lu + way;
-  sprintf(fn, "%s/%03lu.sstx", dirname, magic);
-  const int fdout = open(fn, O_WRONLY|O_CREAT|O_TRUNC, 00644);
-  free(fn);
+  sprintf(fn, "%03lu.sstx", magic);
+  const int fdout = openat(dirfd, fn, O_WRONLY|O_CREAT|O_TRUNC, 00644);
   if (fdout < 0)
     return 0;
 
@@ -628,21 +640,25 @@ sst_build(struct miter * const miter, const char * const dirname,
   kv_refill(tmp0, "", 0, "", 0);
   struct kv * const tmp1 = malloc(SST_MAX_BLKSZ);
 
-  u8 * const blkbuf = malloc(SST_MAX_BLKSZ); // kv block
-  u8 * kvcsr = blkbuf; // cursor
-  u16 * const bmbuf = malloc(256 * sizeof(bmbuf[0])); // offsets of all keys in a block
-  u16 * const kvoffs = bmbuf+1;
+  // kv encoding buffers
+  struct iovec vecs[SST_BUILD_NVEC];
+  u8 * const databufs = malloc(SST_BUILD_BUFSZ * SST_BUILD_NVEC); // kv blocks
+  u16 * mbuf = (u16 *)databufs;
+  u8 * kvbuf = ((u8 *)mbuf) + SST_BUILD_METASZ;
+  u8 * kvcsr = kvbuf;
+  u32 vi = 0;
+
   // max number of 4kB data blocks
   debug_assert(maxblks && (maxblks <= SST_MAX_BLKID));
   struct sst_blkmeta * const bms = calloc(1, sizeof(bms[0]) * (maxblks + SST_MAX_BLKPGNR));
   u32 keyid = 0; // number of keys in current block
   u32 blkid = 0;
   u32 totkv = 0;
+  // at most 65536 ikeys
+  u32 * const ioffs = malloc(sizeof(ioffs[0]) * (1lu << 16)); // offsets of ikeys
 
   struct kvenc * const aenc = kvenc_create();
   struct kvenc * const kenc = kvenc_create();
-  // at most 65536 ikeys
-  u32 * const ioffs = malloc(sizeof(ioffs[0]) * (1lu << 16)); // offsets of ikeys
   u32 inr = 0;
 
   if (k0)
@@ -666,13 +682,13 @@ sst_build(struct miter * const miter, const char * const dirname,
 
     const size_t est1 = curr ? ((u32)sst_kv_vi128_estimate(curr) + sizeof(u16)) : 0;
     if (est1 > SST_MAX_KVSZ) {
-      fprintf(stderr, "skip very long kv: size == %zu\n", est1);
+      fprintf(stderr, "WARNING: skip very long kv: size=%zu\n", est1);
       miter_skip_unique(miter);
       continue;
     }
-    // estimate the size if curr is added to the current block
+    // estimate the sizes if curr is added to the current block
     const u32 metasz = sizeof(u16) * (keyid + 1);
-    const u32 datasz = (u32)(kvcsr - blkbuf);
+    const u32 datasz = (u32)(kvcsr - kvbuf);
     const u32 totsz = metasz + datasz;
     const u32 esttot = totsz + (u32)est1;
     // close and write current block if:
@@ -686,25 +702,34 @@ sst_build(struct miter * const miter, const char * const dirname,
 
       // blksize: whole pages
       const u32 blksize = (u32)bits_round_up(metasz + datasz, 12);
-      const u8 blknr = (u8)(blksize >> 12);
-      debug_assert(blksize <= SST_MAX_BLKSZ);
-      // fix the offsets: add metadata size to kv offsets
+      const u8 blknr = (u8)(blksize >> 12); // 1 to 16
+      debug_assert(blknr && (blknr <= SST_MAX_BLKPGNR));
+      // encode the metadata right before the kvbuf
+      u16 * const mbuf1 = (u16 *)(kvbuf - metasz);
       for (u32 i = 0; i < keyid; i++)
-        kvoffs[i] += (sizeof(u16) * (keyid + 1));
+        mbuf1[i+1] = mbuf[i] + metasz;
 
       // write all metadata: metasz bytes
       // save in the buffer
       struct sst_blkmeta * const pblkmeta = &(bms[blkid]);
       pblkmeta->nkeys = keyid; // 1 byte # of keys
       pblkmeta->nblks = blknr; // 1byte # of 4kB blocks
-      bmbuf[0] = *(u16 *)pblkmeta;
-      memset(kvcsr, 0, blksize - metasz - datasz);
-      struct iovec vec[2] = {{bmbuf, metasz}, {blkbuf, blksize - metasz}};
-      writev(fdout, vec, 2); // ignore I/O errors
+      mbuf1[0] = *(u16 *)pblkmeta;
+      memset(kvcsr, 0, blksize - metasz - datasz); // zero-padding
 
+      struct iovec * const vec = &vecs[vi];
+      vec->iov_base = mbuf1;
+      vec->iov_len = blksize;
+      vi++;
+      if (vi == SST_BUILD_NVEC) {
+        writev(fdout, vecs, vi); // ignore I/O errors
+        vi = 0;
+      }
+      mbuf = (u16 *)(databufs + (SST_BUILD_BUFSZ * vi));
+      kvbuf = ((u8 *)mbuf) + SST_BUILD_METASZ;
+      kvcsr = kvbuf;
       keyid = 0;
-      kvcsr = blkbuf;
-      blkid += (blksize / PGSZ);
+      blkid += blknr;
       // stop processing the next block; break the do-while loop
       if ((curr == NULL) || (blkid >= maxblks))
         break;
@@ -725,10 +750,10 @@ sst_build(struct miter * const miter, const char * const dirname,
     }
 
     // append kv to data block
-    kvoffs[keyid++] = (u16)(kvcsr - blkbuf);
+    mbuf[keyid++] = (u16)(kvcsr - kvbuf);
     kvcsr = sst_kv_vi128_encode(kvcsr, curr);
     totkv++;
-    // copy keys for faster remix rebuilding
+    // copy keys for faster remix building
     if (ckeys) {
       const u32 lcp = kv_key_lcp(curr, tmp0);
       const u32 slen = curr->klen - lcp;
@@ -741,6 +766,9 @@ sst_build(struct miter * const miter, const char * const dirname,
     kv_dup2_key(curr, tmp0);
     miter_skip_unique(miter);
   } while (true);
+
+  if (vi)
+    writev(fdout, vecs, vi); // ignore I/O errors
 
   debug_assert(inr < UINT16_MAX);
   // place bms immediately after data blocks
@@ -784,15 +812,27 @@ sst_build(struct miter * const miter, const char * const dirname,
   // done
   fsync(fdout);
   close(fdout);
-  kvenc_destroy(aenc);
-  kvenc_destroy(kenc);
   free(tmp0);
   free(tmp1);
-  free(blkbuf);
+  free(databufs);
   free(bms);
-  free(bmbuf);
   free(ioffs);
+  kvenc_destroy(aenc);
+  kvenc_destroy(kenc);
   return wok ? totsz : 0;
+}
+
+  u64
+sst_build(const char * const dirname, struct miter * const miter,
+    const u64 seq, const u32 way, const u32 maxblks, const bool del, const bool ckeys,
+    const struct kv * const k0, const struct kv * const kz)
+{
+  const int dirfd = open(dirname, O_RDONLY|O_DIRECTORY);
+  if (dirfd < 0)
+    return 0;
+  const u64 ret = sst_build_at(dirfd, miter, seq, way, maxblks, del, ckeys, k0, kz);
+  close(dirfd);
+  return ret;
 }
 // }}} sst_build
 
@@ -1119,10 +1159,8 @@ struct msstx_iter {
   struct sst_iter iters[MSST_NWAY];
 };
 
-// naming convention: nway == 8
-// dirname-0.sstx, dirname-1.sstx, ..., dirname-7.sstx, dirname-8.ssty
   static struct msst *
-msstx_open_reuse(const char * const dirname, const u64 seq, const u32 nway, struct msst * const msst0, const u32 nway0)
+msstx_open_at_reuse(const int dirfd, const u64 seq, const u32 nway, struct msst * const msst0, const u32 nway0)
 {
   if (nway > MSST_NWAY)
     return NULL;
@@ -1139,7 +1177,7 @@ msstx_open_reuse(const char * const dirname, const u64 seq, const u32 nway, stru
   }
 
   for (u32 i = nway0; i < nway; i++) {
-    if (sst_init(dirname, seq, i, &(msst->ssts[i])) == false)
+    if (!sst_init_at(dirfd, seq, i, &(msst->ssts[i])))
       goto fail_sst;
   }
   msst->seq = seq;
@@ -1155,10 +1193,21 @@ fail_sst:
   return NULL;
 }
 
+  static struct msst *
+msstx_open_at(const int dirfd, const u64 seq, const u32 nway)
+{
+  return msstx_open_at_reuse(dirfd, seq, nway, NULL, 0);
+}
+
   inline struct msst *
 msstx_open(const char * const dirname, const u64 seq, const u32 nway)
 {
-  return msstx_open_reuse(dirname, seq, nway, NULL, 0);
+  const int dirfd = open(dirname, O_RDONLY|O_DIRECTORY);
+  if (dirfd < 0)
+    return NULL;
+  struct msst * const msst = msstx_open_at_reuse(dirfd, seq, nway, NULL, 0);
+  close(dirfd);
+  return msst;
 }
 
   inline void
@@ -1434,14 +1483,13 @@ struct ssty {
   //const struct sst_blkmeta * bms[MSST_NWAY];
 };
 
-  struct ssty *
-ssty_open(const char * const dirname, const u64 seq, const u32 nway)
+  static struct ssty *
+ssty_open_at(const int dirfd, const u64 seq, const u32 nway)
 {
-  char * const fn = malloc(strlen(dirname) + 30);
+  char fn[16];
   const u64 magic = seq * 100lu + nway;
-  sprintf(fn, "%s/%03lu.ssty", dirname, magic);
-  const int fd = open(fn, O_RDONLY);
-  free(fn);
+  sprintf(fn, "%03lu.ssty", magic);
+  const int fd = openat(dirfd, fn, O_RDONLY);
   if (fd < 0)
     return NULL;
   struct stat st;
@@ -1474,6 +1522,17 @@ ssty_open(const char * const dirname, const u64 seq, const u32 nway)
 fail:
   close(fd);
   return NULL;
+}
+
+  struct ssty *
+ssty_open(const char * const dirname, const u64 seq, const u32 nway)
+{
+  const int dirfd = open(dirname, O_RDONLY|O_DIRECTORY);
+  if (dirfd < 0)
+    return NULL;
+  struct ssty * const ssty = ssty_open_at(dirfd, seq, nway);
+  close(dirfd);
+  return ssty;
 }
 
   void
@@ -1555,8 +1614,17 @@ struct mssty_iter {
   struct sst_iter iters[MSST_NWAY];
 };
 
+  static bool
+mssty_open_y_at(const int dirfd, struct msst * const msst)
+{
+  debug_assert(msst->ssty == NULL);
+  struct ssty * const ssty = ssty_open_at(dirfd, msst->seq, msst->nway);
+  msst->ssty = ssty;
+  return ssty != NULL;
+}
+
   bool
-mssty_open_y(struct msst * const msst, const char * const dirname)
+mssty_open_y(const char * const dirname, struct msst * const msst)
 {
   debug_assert(msst->ssty == NULL);
   struct ssty * const ssty = ssty_open(dirname, msst->seq, msst->nway);
@@ -1565,19 +1633,31 @@ mssty_open_y(struct msst * const msst, const char * const dirname)
 }
 
 // naming convention example: seq=123, nway=8:
-// dirname/12300.sstx, dirname/12301.sstx, ..., dirname/12307.sstx, dirname/12308.ssty
-  struct msst *
-mssty_open(const char * const dirname, const u64 seq, const u32 nway)
+// dir/12300.sstx, dir/12301.sstx, ..., dir/12307.sstx, dir/12308.ssty
+  static struct msst *
+mssty_open_at(const int dirfd, const u64 seq, const u32 nway)
 {
-  struct msst * const msst = msstx_open(dirname, seq, nway);
+  struct msst * const msst = msstx_open_at(dirfd, seq, nway);
   if (msst == NULL)
     return NULL;
 
-  if (!mssty_open_y(msst, dirname)) {
+  if (!mssty_open_y_at(dirfd, msst)) {
     msstx_destroy(msst);
     return NULL;
   }
 
+  return msst;
+}
+
+  struct msst *
+mssty_open(const char * const dirname, const u64 seq, const u32 nway)
+{
+  const int dirfd = open(dirname, O_RDONLY|O_DIRECTORY);
+  if (dirfd < 0)
+    return NULL;
+
+  struct msst * const msst = mssty_open_at(dirfd, seq, nway);
+  close(dirfd);
   return msst;
 }
 
@@ -2356,13 +2436,13 @@ mssty_dump(struct msst * const msst, const char * const fn)
 struct ssty_build_info {
   struct msst * x1; // input: target tables
   struct msst * y0; // input: the old mssty or NULL
-  const char * dirname; // input
 
   // allocated by the main function; filled by the sort function
   u8 * ranks; // output: run selectors
   struct sst_ptr * ptrs; // output: cursor positions
   struct kv ** anchors; // output: anchors
 
+  int dirfd; // input
   u32 way0;  // input: number of ssts to reuse in y0
   u32 nkidx; // output: maximum key index
   u32 nsecs; // output: number of groups
@@ -2928,7 +3008,7 @@ msstbc_sync_lo(struct msstb * const b)
 msstbc_sync_hi(struct msstb * const b)
 {
   while ((b->way1 < b->nway) && (!sstc_iter_valid(b->citers[b->way1])))
-     b->way1++;
+    b->way1++;
 }
 
   static void
@@ -3120,17 +3200,16 @@ ssty_build_sort_msstb(struct ssty_build_info * const bi)
 
 // main {{{
 // y0 and way0 are optional
-  u32
-ssty_build(struct msst * const x1, const char * const dirname,
+  static u32
+ssty_build_at(const int dirfd, struct msst * const x1,
     const u64 seq, const u32 nway, struct msst * const y0, const u32 way0)
 {
   // open ssty file for output
   debug_assert(nway == x1->nway);
-  char * const fn = malloc(strlen(dirname) + 30);
+  char fn[24];
   const u64 magic = seq * 100lu + nway;
-  sprintf(fn, "%s/%03lu.ssty", dirname, magic);
-  const int fdout = open(fn, O_WRONLY|O_CREAT|O_TRUNC, 00644);
-  free(fn);
+  sprintf(fn, "%03lu.ssty", magic);
+  const int fdout = openat(dirfd, fn, O_WRONLY|O_CREAT|O_TRUNC, 00644);
   if (fdout < 0)
     return 0;
 
@@ -3149,7 +3228,7 @@ ssty_build(struct msst * const x1, const char * const dirname,
   struct kv ** const anchors = malloc(sizeof(*anchors) * maxsecs);
   debug_assert(ranks && ptrs && anchors);
 
-  struct ssty_build_info bi = {.x1 = x1, .y0 = y0, .dirname = dirname, .way0 = way0,
+  struct ssty_build_info bi = {.x1 = x1, .y0 = y0, .dirfd = dirfd, .way0 = way0,
     .ranks = ranks, .ptrs = ptrs, .anchors = anchors};
 
   ssty_build_sort_msstb(&bi);
@@ -3257,6 +3336,18 @@ ssty_build(struct msst * const x1, const char * const dirname,
   close(fdout);
   return succ ? (u32)fsize : 0;
 }
+
+  u32
+ssty_build(const char * const dirname, struct msst * const x1,
+    const u64 seq, const u32 nway, struct msst * const y0, const u32 way0)
+{
+  const int dirfd = open(dirname, O_RDONLY|O_DIRECTORY);
+  if (dirfd < 0)
+    return 0;
+  const u32 ret = ssty_build_at(dirfd, x1, seq, nway, y0, way0);
+  close(dirfd);
+  return ret;
+}
 // }}} main
 
 // }}} ssty_build
@@ -3340,13 +3431,16 @@ msstv_append(struct msstv * const v, struct msst * const msst, const struct kv *
 }
 
 // save to a file
-  bool
-msstv_save(struct msstv * const v, const char * const dirname)
+  static bool
+msstv_save(struct msstv * const v, const int dirfd)
 {
-  char * fn = malloc(strlen(dirname) + 30);
-  sprintf(fn, "%s/%lu.ver", dirname, v->version);
-  FILE * const fout = fopen(fn, "w");
-  free(fn);
+  char fn[24];
+  sprintf(fn, "%lu.ver", v->version);
+  int fd = openat(dirfd, fn, O_CREAT|O_WRONLY|O_TRUNC, 00644);
+  if (fd < 0)
+    return false;
+
+  FILE * const fout = fdopen(fd, "w");
   if (fout == NULL)
     return false;
   setvbuf(fout, NULL, _IOFBF, 1lu << 16); // 64kB
@@ -3365,28 +3459,28 @@ msstv_save(struct msstv * const v, const char * const dirname)
 }
 
 // open version and open all msstys
-  struct msstv *
-msstv_open(const char * const dirname, const char * const filename)
+  static struct msstv *
+msstv_open_at(const int dirfd, const char * const filename)
 {
-  debug_assert(dirname);
-  debug_assert(filename);
-  char * fn = malloc(strlen(dirname) + strlen(filename) + 10);
-  sprintf(fn, "%s/%s", dirname, filename);
-  FILE * const fin = fopen(fn, "r");
-  free(fn);
-  if (fin == NULL)
+  const int fd = openat(dirfd, filename, O_RDONLY);
+  if (fd < 0)
     return NULL;
 
-  fseek(fin, 0, SEEK_END);
-  const u64 filesz = (u64)ftell(fin);
+  const u64 filesz = fdsize(fd);
   if (filesz < (sizeof(u64) * 2 + sizeof(struct kv))) {
-    fclose(fin);
+    close(fd);
     return NULL;
   }
-  u8 * const buf = calloc(1, filesz);
-  fseek(fin, 0, SEEK_SET);
-  fread(buf, filesz, 1, fin);
-  fclose(fin);
+
+  u8 * const buf = malloc(filesz);
+  const ssize_t nread = pread(fd, buf, filesz, 0);
+  if (filesz != (u64)nread) {
+    free(buf);
+    close(fd);
+    return NULL;
+  }
+  close(fd);
+
   const u64 v1 = ((const u64 *)buf)[0];
   const u64 nr = ((const u64 *)buf)[1];
   debug_assert(nr);
@@ -3397,19 +3491,30 @@ msstv_open(const char * const dirname, const char * const filename)
   for (u64 i = 0; i < nr; i++) {
     struct kv * const anchor = (typeof(anchor))cursor;
     const u64 magic = anchor->priv;
-    struct msst * const mssty = mssty_open(dirname, magic / 100, magic % 100);
+    // rc: msstz_open sets rc later; compaction sets rc manually
+    struct msst * const mssty = mssty_open_at(dirfd, magic / 100, magic % 100);
     if (!mssty) {
       msstv_destroy(v);
       free(buf);
       return NULL;
     }
-    // TODO: rc
     msstv_append(v, mssty, anchor);
     cursor += (bits_round_up(key_size(anchor), 3));
   }
 
   debug_assert((u64)(cursor - buf) == filesz);
   free(buf);
+  return v;
+}
+
+  struct msstv *
+msstv_open(const char * const dirname, const char * const filename)
+{
+  const int dirfd = open(dirname, O_RDONLY|O_DIRECTORY);
+  if (dirfd < 0)
+    return NULL;
+  struct msstv * const v = msstv_open_at(dirfd, filename);
+  close(dirfd);
   return v;
 }
 
@@ -3488,6 +3593,13 @@ msstv_search_le(struct msstv * const v, const struct kref * const key)
       return m;
   }
   return l;
+}
+
+  struct kv *
+msstv_last(struct msstv * const v, struct kv * const out)
+{
+  struct msst * const plast = v->es[v->nr-1].msst;
+  return mssty_last(plast, out);
 }
 
   struct kv *
@@ -3772,7 +3884,7 @@ struct msstz {
 
   double t0;
   int stat_log; // for printf
-  int stat_log2; // could be stderr
+  int dirfd; // could be stderr
   u64 stat_time; // time spent in comp()
   u64 stat_writes; // total bytes written to sstx&ssty
   u64 stat_reads; // total bytes read through rcache; user reads are included if running concurrently
@@ -3792,50 +3904,37 @@ msstz_log(struct msstz * const z, const char * const fmt, ...)
   va_start(ap, fmt);
   vdprintf(z->stat_log, buf, ap);
   va_end(ap);
-
-  if (z->stat_log2 >= 0) {
-    va_start(ap, fmt);
-    vdprintf(z->stat_log2, buf, ap);
-    va_end(ap);
-  }
 }
 
   static void
-msstz_head_sync(const char * const dirname, const u64 version)
+msstz_head_sync(const int dirfd, const u64 version)
 {
-  const u64 len = strlen(dirname) + 30;
-  char * const linkfn = malloc(len);
-  char * const basefn = malloc(len);
+  char basefn[24];
   sprintf(basefn, "./%lu.ver", version);
 
-  sprintf(linkfn, "%s/HEAD", dirname);
-  unlink(linkfn);
-  symlink(basefn, linkfn);
+  unlinkat(dirfd, "HEAD", 0);
+  symlinkat(basefn, dirfd, "HEAD");
 
-  sprintf(linkfn, "%s/HEAD1", dirname);
-  unlink(linkfn);
-  symlink(basefn, linkfn);
-
-  free(linkfn);
-  free(basefn);
+  unlinkat(dirfd, "HEAD1", 0);
+  symlinkat(basefn, dirfd, "HEAD1");
   return;
 }
 
 // create empty store
   static struct msstv *
-msstz_create_v0(const char * const dirname)
+msstz_create_v0(const int dirfd)
 {
   // msstx nway = 0
-  struct msst * const msst = msstx_open(dirname, 0, 0);
+  struct msst * const msst = msstx_open_at(dirfd, 0, 0);
   if (!msst)
     return NULL;
 
-  if (!ssty_build(msst, dirname, 0, 0, NULL, 0)) {
+  if (!ssty_build_at(dirfd, msst, 0, 0, NULL, 0)) {
     msstx_destroy(msst);
     return NULL;
   }
 
-  if (!mssty_open_y(msst, dirname)) {
+  if (!mssty_open_y_at(dirfd, msst)) {
     msstx_destroy(msst);
     return NULL;
   }
@@ -3854,24 +3953,24 @@ msstz_create_v0(const char * const dirname)
 msstz_open(const char * const dirname, const u64 cache_size_mb, const bool ckeys)
 {
   // get the dir
-  int dfd = open(dirname, O_RDONLY | O_DIRECTORY);
-  if (dfd < 0) {
+  int dirfd = open(dirname, O_RDONLY | O_DIRECTORY);
+  if (dirfd < 0) {
     mkdir(dirname, 00777);
-    dfd = open(dirname, O_RDONLY | O_DIRECTORY);
+    dirfd = open(dirname, O_RDONLY | O_DIRECTORY);
   }
-  if (dfd < 0)
+  if (dirfd < 0)
     return NULL;
-  close(dfd);
 
   // get a version
-  struct msstv * hv = msstv_open(dirname, "HEAD");
+  struct msstv * hv = msstv_open_at(dirfd, "HEAD");
   if (hv == NULL)
-    hv = msstv_open(dirname, "HEAD1");
+    hv = msstv_open_at(dirfd, "HEAD1");
   if (hv == NULL)
-    hv = msstz_create_v0(dirname);
-  if (hv == NULL)
+    hv = msstz_create_v0(dirfd);
+  if (hv == NULL) {
+    close(dirfd);
     return NULL;
-
+  }
 
   hv->rdrcnt = 0;
   u64 seq = 0;
@@ -3901,30 +4000,25 @@ msstz_open(const char * const dirname, const u64 cache_size_mb, const bool ckeys
   z->nway_major = MSSTZ_NWAY_MAJOR; // fixed
   z->nway_minor = MSSTZ_NWAY_MINOR; // fixed
   z->ckeys = ckeys;
+  z->dirfd = dirfd;
 
-  char * const logfn = malloc(strlen(dirname) + 128);
-  char * const linkfn = malloc(strlen(dirname) + 128);
+  char logfn[80];
   char buf[64];
   time_stamp2(buf, 64);
 
-  sprintf(logfn, "%s/log-%s", dirname, buf);
-  z->stat_log = open(logfn, O_CREAT|O_WRONLY|O_TRUNC, 0644);
+  sprintf(logfn, "log-%s", buf);
+  z->stat_log = openat(dirfd, logfn, O_CREAT|O_WRONLY|O_TRUNC, 00644);
   debug_assert(z->stat_log >= 0);
 
-  sprintf(logfn, "./log-%s", buf); // use relative path for the link
-  sprintf(linkfn, "%s/LOG", dirname);
-  unlink(linkfn);
-  symlink(logfn, linkfn);
-  free(logfn);
-  free(linkfn);
+  unlinkat(dirfd, "LOG", 0);
+  symlinkat(logfn, dirfd, "LOG");
 
-  z->stat_log2 = -1;
   z->t0 = time_sec();
 
   rwlock_init(&(z->head_lock));
   char ts[64];
   time_stamp(ts, 64);
-  msstz_log(z, "%s %s seq %lu cache=%lu %s\n", __func__, ts, seq0, cache_size_mb, cache_size_mb ? "on":"off");
+  msstz_log(z, "%s time %s v %lu seq %lu cache %lu\n", __func__, ts, msstz_version(z), seq0, cache_size_mb);
 
   for (u64 i = 0; i < hv->nr; i++) {
     const u64 magic = hv->es[i].anchor->priv;
@@ -3951,8 +4045,14 @@ msstz_set_minsz(struct msstz * const z, const u64 minsz)
   z->minsz = minsz;
 }
 
+  inline u64
+msstz_version(struct msstz * const z)
+{
+  return z->hv->version;
+}
+
 // free unused versions and delete unused files
-// TODO: make sure it's safe to execute during concurrent compaction (maxseq?)
+// currently the first analyze worker do the gc
   static void
 msstz_gc(struct msstz * const z)
 {
@@ -4013,16 +4113,12 @@ msstz_gc(struct msstz * const z)
   qsort_u64(vall, nr);
   const u64 maxseq = vseq[nr-1];
   // search file in dir
-  DIR * const dir = opendir(z->dirname);
+  DIR * const dir = opendir(z->dirname); // don't directly use the dirfd
   if (!dir) {
     msstz_log(z, "%s opendir() failed\n", __func__);
     exit(0);
   }
-  const int dirfd1 = dirfd(dir);
-  if (dirfd1 < 0) {
-    msstz_log(z, "%s dirfd() failed\n", __func__);
-    exit(0);
-  }
+
   u64 nu = 0;
   do {
     struct dirent * const ent = readdir(dir);
@@ -4030,7 +4126,16 @@ msstz_gc(struct msstz * const z)
       break;
     char * dot = strchr(ent->d_name, '.');
     // has dot and is .sst*
-    if ((!dot) || memcmp(dot, ".sst", 4))
+    if (!dot)
+      continue;
+
+    if (!memcmp(dot, ".ver", 4)) {
+      if (a2u64(ent->d_name) < hv->version)
+        unlinkat(z->dirfd, ent->d_name, 0);
+      continue;
+    }
+
+    if (memcmp(dot, ".sst", 4))
       continue;
     const u64 magic = a2u64(ent->d_name);
     const u64 seq = magic / 100;
@@ -4048,7 +4153,7 @@ msstz_gc(struct msstz * const z)
       debug_die();
     }
     // now delete
-    unlinkat(dirfd1, ent->d_name, 0);
+    unlinkat(z->dirfd, ent->d_name, 0);
     //msstz_log(z, "%s unlink %s\n", __func__, ent->d_name);
     nu++;
   } while (true);
@@ -4093,8 +4198,9 @@ msstz_destroy(struct msstz * const z)
   if (z->rc)
     rcache_destroy(z->rc);
 
-  free(z->dirname);
   close(z->stat_log);
+  free(z->dirname);
+  close(z->dirfd);
   free(z);
 }
 // }}} msstz
@@ -4207,15 +4313,15 @@ msstz_yq_consume(struct msstz_comp_info * const ci)
 
   // open a msstx and call ssty_build
   //const u64 t0 = time_nsec();
-  struct msst * const msst = msstx_open_reuse(z->dirname, task->seq1, task->way1, task->y0, task->way0);
+  struct msst * const msst = msstx_open_at_reuse(z->dirfd, task->seq1, task->way1, task->y0, task->way0);
   msst_rcache(msst, z->rc);
-  const u32 ysz = ssty_build(msst, z->dirname, task->seq1, task->way1, task->y0, task->way0);
+  const u32 ysz = ssty_build_at(z->dirfd, msst, task->seq1, task->way1, task->y0, task->way0);
   if (!ysz)
     debug_die();
   ci->stat_writes += ysz;
 
   // convert msstx to mssty
-  const bool ry = mssty_open_y(msst, z->dirname);
+  const bool ry = mssty_open_y_at(z->dirfd, msst);
   if (!ry)
     debug_die();
   task->y1 = msst; // done; the new partition is now loaded and ready to use
@@ -4254,7 +4360,7 @@ msstz_comp_ssts(struct msstz_comp_info * const ci, const u64 ipart, struct miter
   // a compaction may create new partitions, each with several new tables
   do {
     //const u64 t0 = time_nsec();
-    const u64 sizex = sst_build(miter, z->dirname, seq, way, z->nblks, split, z->ckeys, NULL, kz);
+    const u64 sizex = sst_build_at(z->dirfd, miter, seq, way, z->nblks, split, z->ckeys, NULL, kz);
     //const u64 dt = time_diff_nsec(t0);
     ci->stat_writes += sizex;
     //msstz_log(z, "%s dt-ms %lu sst-build %lu-%02u %lu\n", __func__, dt / 1000000, seq, way, sizex);
@@ -4292,21 +4398,18 @@ msstz_comp_ssts(struct msstz_comp_info * const ci, const u64 ipart, struct miter
 }
 
   static void
-msstz_comp_link(const char * const dirname, const u64 seq0, const u64 seq1, const u32 nway)
+msstz_comp_link(const int dirfd, const u64 seq0, const u64 seq1, const u32 nway)
 {
   debug_assert(seq0 < seq1);
-  const size_t len = strlen(dirname) + 30;
-  char * const fn0 = malloc(len);
-  char * const fn1 = malloc(len);
+  char fn0[24];
+  char fn1[24];
 
   for (u32 i = 0; i < nway; i++) {
-    sprintf(fn0, "%s/%03lu.sstx", dirname, seq0 * 100lu + i);
-    sprintf(fn1, "%s/%03lu.sstx", dirname, seq1 * 100lu + i);
-    unlink(fn1);
-    link(fn0, fn1);
+    sprintf(fn0, "%03lu.sstx", seq0 * 100lu + i);
+    sprintf(fn1, "%03lu.sstx", seq1 * 100lu + i);
+    unlinkat(dirfd, fn1, 0);
+    linkat(dirfd, fn0, dirfd, fn1, 0);
   }
-  free(fn0);
-  free(fn1);
 }
 // }}} x
 
@@ -4357,8 +4460,8 @@ msstz_comp_harvest(struct msstz_comp_info * const ci)
   v1->rc = z->rc;
   v1->next = v0;
   // finalize the new version v1
-  msstv_save(v1, z->dirname);
-  msstz_head_sync(z->dirname, v1->version);
+  msstv_save(v1, z->dirfd);
+  msstz_head_sync(z->dirfd, v1->version);
 
   // add the new version to z
   rwlock_lock_write(&(z->head_lock));
@@ -4597,7 +4700,7 @@ msstz_comp_x(struct msstz_comp_info * const ci, const u64 ipart)
   if (bestway < nway0) { // major or partial
     debug_assert(seq1 != seq0);
     // hard link unchanged files for major and partial
-    msstz_comp_link(z->dirname, seq0, seq1, bestway);
+    msstz_comp_link(z->dirfd, seq0, seq1, bestway);
 
     if (bestway) { // partial
       for (u32 w = bestway; w < nway0; w++)

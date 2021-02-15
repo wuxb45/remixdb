@@ -32,14 +32,15 @@ struct mt_pair {
 };
 
 struct wal {
-  int fd;
+  int fds[2]; // use this
   struct wring * wring;
   u8 * buf; // wring_acquire()-ed
-  u64 bufoff; // in bytes <= bufsz
-  u64 headblk; // 1,2,3...
-  u64 nblks; // file size
+  u64 bufoff; // in bytes <= WAL_BLKSZ
+  u64 woff; // a multiple of 4K (PGSZ)
+  u64 soff; // last sync offset, <= woff
+  u64 maxsz; // max file size
   u64 write_user;
-  u64 write_nblks;
+  u64 write_nbytes;
 };
 
 // map
@@ -121,20 +122,36 @@ xdb_unlock(struct xdb * const xdb)
   static void
 wal_flush_buf(struct wal * const wal)
 {
-  wring_write(wal->wring, wal->headblk * WAL_BLKSZ, wal->buf);
+  if (wal->bufoff == 0)
+    return;
+
+  const size_t wsize = bits_round_up(wal->bufoff, 12); // whole pages
+  memset(wal->buf + wal->bufoff, 0, wsize - wal->bufoff);
+  wring_write_partial(wal->wring, wal->woff, wal->buf, 0, wsize);
   wal->buf = wring_acquire(wal->wring);
   debug_assert(wal->buf);
   wal->bufoff = 0;
-  wal->headblk++;
-  wal->write_nblks++;
+  wal->woff += wsize;
+  wal->write_nbytes += wsize;
 
-  // fsync is not necessary when using direct-io + io_uring
-#if 0
-#define XDB_SYNC_SIZE ((1lu<<25)) // 32MB
-#define XDB_SYNC_NBLKS_MASK (((XDB_SYNC_SIZE / WAL_BLKSZ) - 1))
-  if ((wal->headblk & XDB_SYNC_NBLKS_MASK) == 0)
+#define XDB_SYNC_SIZE ((1lu<<26)) // 64MB
+  if ((wal->woff - wal->soff) >= XDB_SYNC_SIZE) {
+    // queue the fsync but does not wait for completion (not required by a user)
     wring_fsync(wal->wring);
-#endif
+    wal->soff = wal->woff;
+  }
+}
+
+// must call with lock
+  static void
+wal_flush_buf_sync(struct wal * const wal)
+{
+  wal_flush_buf(wal);
+
+  if (wal->woff != wal->soff)
+    wring_fsync(wal->wring);
+
+  wring_flush(wal->wring);
 }
 
 // must call with xdb->lock locked
@@ -142,46 +159,104 @@ wal_flush_buf(struct wal * const wal)
 wal_append(struct wal * const wal, const struct kv * const kv)
 {
   debug_assert(kv);
-  const size_t estsz = sst_kv_vi128_estimate(kv);
+  // kv+crc32c
+  const size_t estsz = sst_kv_vi128_estimate(kv) + sizeof(u32);
   if ((estsz + wal->bufoff) > WAL_BLKSZ)
     wal_flush_buf(wal);
 
   debug_assert(wal->buf);
-  sst_kv_vi128_encode(wal->buf + wal->bufoff, kv);
+  // write kv
+  u8 * const ptr = sst_kv_vi128_encode(wal->buf + wal->bufoff, kv);
+  // write the crc of the key after the value
+  *(u32 *)ptr = kv->hashlo;
   wal->bufoff += estsz;
   debug_assert(wal->bufoff <= WAL_BLKSZ);
 }
 
   static bool
-wal_init(struct wal * const wal, const char * const path, const size_t walsz)
+wal_open(struct wal * const wal, const char * const path)
 {
   char * const fn = malloc(strlen(path) + 10);
-  sprintf(fn, "%s/wal", path);
-#if !defined(O_DIRECT)
-#define O_DIRECT 0
-#endif
-  int fd = open(fn, O_RDWR|O_CREAT|O_DIRECT, 00644);
-  if (fd < 0)
-    fd = open(fn, O_RDWR|O_CREAT, 00644);
-  free(fn);
-  if (fd < 0)
+  if (!fn)
     return false;
 
-  wal->fd = fd;
-  wal->wring = wring_create(fd, WAL_BLKSZ, 32);
+  sprintf(fn, "%s/wal1", path);
+  const int fd1 = open(fn, O_RDWR|O_CREAT, 00644);
+  if (fd1 < 0) {
+    fprintf(stderr, "%s open %s failed\n", __func__, fn);
+    goto fail_open1;
+  }
+  wal->fds[0] = fd1;
+
+  sprintf(fn, "%s/wal2", path);
+  const int fd2 = open(fn, O_RDWR|O_CREAT, 00644);
+  if (fd2 < 0) {
+    fprintf(stderr, "%s open %s failed\n", __func__, fn);
+    goto fail_open2;
+  }
+  wal->fds[1] = fd2;
+
+  // fd can be replaced during recovery
+  wal->wring = wring_create(fd1, WAL_BLKSZ, 32);
+  if (!wal->wring)
+    goto fail_wring;
+
   wal->buf = wring_acquire(wal->wring);
-  wal->nblks = walsz / WAL_BLKSZ;
+  if (!wal->buf)
+    goto fail_buf;
+
+  free(fn);
   return true;
+
+fail_buf:
+  wring_destroy(wal->wring);
+  wal->wring = NULL;
+fail_wring:
+  close(fd2);
+fail_open2:
+  close(fd1);
+fail_open1:
+  free(fn);
+  return false;
+}
+
+// must call with lock
+// return the old wal size
+  static u64
+wal_switch(struct wal * const wal, const u64 version)
+{
+  wal_flush_buf_sync(wal);
+  const u64 woff0 = wal->woff;
+  // bufoff already set to 0
+  wal->woff = 0;
+  wal->soff = 0;
+
+  // swap fds
+  const int fd1 = wal->fds[0];
+  wal->fds[0] = wal->fds[1];
+  wal->fds[1] = fd1;
+  wring_update_fd(wal->wring, wal->fds[0]);
+
+  memcpy(wal->buf, &version, sizeof(version));
+  wal->bufoff = sizeof(version);
+
+  return woff0;
+}
+
+  static void
+wal_discard_old(struct wal * const wal)
+{
+  ftruncate(wal->fds[1], 0);
 }
 
   static void
 wal_close(struct wal * const wal)
 {
-  wring_write(wal->wring, wal->headblk * WAL_BLKSZ, wal->buf);
-  wal->buf = NULL;
-  wring_destroy(wal->wring);
-  fdatasync(wal->fd);
-  close(wal->fd);
+  wal_flush_buf_sync(wal);
+  wring_destroy(wal->wring); // destroy will call wring_flush
+
+  close(wal->fds[0]);
+  close(wal->fds[1]);
 }
 // }}} wal
 
@@ -305,7 +380,7 @@ xdb_mt_reinsert_func(struct kv * const kv0, void * const priv)
 {
   struct xdb_mt_merge_ctx * const ctx = priv;
   ctx->success = kv0 == NULL;
-  return kv0 ? kv0 : ctx->new_kv;
+  return kv0 ? kv0 : xdb_dup_kv(ctx->new_kv);
 }
 
 // insert rejected keys from imt into wmt; vlen == 1 marks a rejected partition
@@ -339,7 +414,7 @@ xdb_reinsert_rejected(struct xdb * const xdb, void * const wmt_map, void * const
       if (curr == end)
         break;
 
-      ctx.new_kv = xdb_dup_kv(curr);
+      ctx.new_kv = curr;
       if (!ctx.new_kv)
         debug_die();
       bool s = kvmap_kv_merge(wmt_api, wmt_ref, curr, xdb_mt_reinsert_func, &ctx);
@@ -381,26 +456,25 @@ xdb_mt_wal_full(struct xdb * const xdb)
 {
   // mt is full OR wal is full
   // when this is true: writers must wait; compaction should start
-  return (xdb->mtsz >= xdb->max_mtsz) || (xdb->wal.headblk >= xdb->wal.nblks);
+  return (xdb->mtsz >= xdb->max_mtsz) || (xdb->wal.woff >= xdb->wal.maxsz);
 }
 
-// compaction steps:
-//   lock(wal)
+// compaction process:
+//   -** lock(xdb)
 //       - switch memtable mode from wmt-only to wmt+imt (very quick)
-//       - flush and switch the log (TODO: use two independent log files)
-//   unlock(wal)
+//       - sync-flush and switch the log
+//   -** unlock(xdb)
 //   - qsbr_wait for users to leave the now imt
 //   - save an old version until the new version is ready for access
 //   - call msstz_comp
 //   - release the data in wal
-//   lock(wal)
-//       - rewrite rejected keys to the wal (TODO: eliminate locking with a separate rejected log file)
-//   unlock(wal)
+//   - rewrite rejected keys to the wal
+//       -** periodically lock(xdb)/unlock(xdb) during reinsert for writing wal
 //   - reinsert rejected keys into wmt; skip those already updated
 //   - release the old version (was using its anchors for rejected partitions)
 //   - switch to the normal mode (wmt only) because keys in the imt are either in wmt or partitions
 //   - qsbr_wait for users to leave the imt
-//   - clean the imt (will be used as the new wmt in the next compaction
+//   - clean the imt (will be used as the new wmt in the next compaction); TODO: this is expensive
 //   - done
   static void
 xdb_do_comp(struct xdb * const xdb, const u64 max_rejsz)
@@ -413,11 +487,9 @@ xdb_do_comp(struct xdb * const xdb, const u64 max_rejsz)
   xdb->version = v_comp; // wmt => wmt+imt
 
   // cut the log
-  wal_flush_buf(&xdb->wal);
-  const u64 mtsz = xdb->mtsz;
-  const u64 walsz = xdb->wal.headblk * WAL_BLKSZ;
+  const u64 walsz0 = wal_switch(&xdb->wal, msstz_version(xdb->z) + 1); // match the next version
+  const u64 mtsz0 = xdb->mtsz;
   xdb->mtsz = 0; // reset mtsz while holding the lock
-  xdb->wal.headblk = 0; // TODO: open a new wal file
 
   xdb_unlock(xdb);
 
@@ -446,13 +518,15 @@ xdb_do_comp(struct xdb * const xdb, const u64 max_rejsz)
   qsbr_wait(xdb->qsbr, (u64)v_normal);
   const double t_wait2 = time_sec();
 
+  // truncate log
+  wal_discard_old(&xdb->wal);
   imt_api->clean(imt_map);
   const double t_clean = time_sec();
 
   // print report
   // writes
   const size_t usr_write = xdb->wal.write_user;
-  const size_t wal_write = xdb->wal.write_nblks * WAL_BLKSZ;
+  const size_t wal_write = xdb->wal.write_nbytes;
   const size_t sst_write = msstz_stat_writes(xdb->z);
   const size_t sst_read = msstz_stat_reads(xdb->z);
   // WA, RA
@@ -461,7 +535,7 @@ xdb_do_comp(struct xdb * const xdb, const u64 max_rejsz)
 
   const u64 mb = 1lu<<20;
   msstz_log(xdb->z, "%s mtsz %lu walsz %lu write-mb usr %lu wal %lu sst %lu WA %.4lf comp-read-mb %lu RA %.4lf\n",
-       __func__, mtsz, walsz, usr_write/mb, wal_write/mb, sst_write/mb, sys_wa, sst_read/mb, comp_ra);
+      __func__, mtsz0, walsz0, usr_write/mb, wal_write/mb, sst_write/mb, sys_wa, sst_read/mb, comp_ra);
   msstz_log(xdb->z, "%s times-ms total %.3lf prep %.3lf comp %.3lf reinsert %.3lf wait2 %.3lf clean %.3lf\n",
       __func__, t_clean-t0, t_prep-t0, t_comp-t_prep, t_reinsert-t_comp, t_wait2-t_reinsert, t_clean-t_wait2);
 }
@@ -512,19 +586,185 @@ xdb_compaction_worker(void * const ptr)
     msstz_log(xdb->z, "%s compaction worker wait-ms %lu\n", __func__, dt / 1000000);
     xdb_do_comp(xdb, xdb->max_rejsz);
   }
-  xdb_do_comp(xdb, 0); // flush log; leave nothing in the memtable; TODO: just save the keys in the log
 
   pthread_exit(NULL);
 }
 // }}} comp
 
 // open close {{{
+// return the ptr after the decoded data if successful, otherwise return NULL
+  static const u8 *
+wal_vi128_decode(const u8 * ptr, const u8 * const end, u32 * const out4, const u8 ** const pkv)
+{
+  const u32 safelen = (end - ptr) < 10 ? (end - ptr) : 10;
+  u32 count = 0;
+  for (u32 i = 0; i < safelen; i++) {
+    if ((ptr[i] & 0x80) == 0)
+      count++;
+  }
+  // can decode klen and vlen
+  if (count < 2)
+    return NULL;
+
+  u32 klen, vlen;
+  ptr = vi128_decode_u32(ptr, &klen);
+  ptr = vi128_decode_u32(ptr, &vlen);
+  const u32 kvlen = klen + (vlen & SST_VLEN_MASK);
+
+  // size
+  if ((ptr + kvlen + sizeof(u32)) > end)
+    return NULL;
+
+  // checksum
+  const u32 sum1 = kv_crc32c(ptr, klen);
+  const u32 sum2 = *(const u32 *)(ptr + kvlen);
+  if (sum1 != sum2)
+    return NULL;
+
+  out4[0] = klen;
+  out4[1] = vlen;
+  out4[2] = kvlen;
+  out4[3] = sum1;
+  *pkv = ptr;
+  return ptr + kvlen + sizeof(u32);
+}
+
+// call with lock
+  static struct kv *
+xdb_recover_update_func(struct kv * const kv0, void * const priv)
+{
+  // only use xdb and new_kv
+  struct xdb_mt_merge_ctx * const ctx = priv;
+  struct xdb * const xdb = ctx->xdb;
+  const size_t newsz = sst_kv_size(ctx->new_kv);
+  const size_t oldsz = kv0 ? sst_kv_size(kv0) : 0;
+  const size_t diffsz = newsz - oldsz;
+  debug_assert(xdb->mtsz >= oldsz);
+  xdb->mtsz += diffsz;
+  return ctx->new_kv;
+}
+
+  static u64
+xdb_recover_fd(struct xdb * const xdb, const int fd)
+{
+  const u64 fsize = fdsize(fd);
+  if (!fsize)
+    return 0;
+
+  u8 * const mem = mmap(NULL, fsize, PROT_READ, MAP_PRIVATE, fd, 0);
+  if (mem == MAP_FAILED)
+    return 0; // abort recovery
+
+  void * const wmt_ref = wmt_api->ref(xdb->mt1);
+  const u8 * iter = mem + sizeof(u64); // skip the version
+  const u8 * const end = mem + fsize;
+  u64 nkeys = 0;
+  struct xdb_mt_merge_ctx ctx = {.xdb = xdb};
+
+  while ((iter < end) && ((*iter) == 0))
+    iter++;
+  while (iter < end) {
+    u32 out4[4];
+    const u8 * kvdata;
+    const u8 * const iter1 = wal_vi128_decode(iter, end, out4, &kvdata);
+
+    // stop
+    if (!iter1)
+      break;
+
+    // insert
+    struct kv * const kv = malloc(sizeof(struct kv) + out4[2]);
+    kv->klen = out4[0];
+    kv->vlen = out4[1];
+    kv->hash = kv_crc32c_extend(out4[3]);
+    memcpy(kv->kv, kvdata, out4[2]);
+    ctx.new_kv = kv;
+    bool s = kvmap_kv_merge(wmt_api, wmt_ref, kv, xdb_recover_update_func, &ctx);
+    if (!s)
+      debug_die();
+
+    iter = iter1;
+    nkeys++;
+    // skip padding zeroes
+    while ((iter < end) && ((*iter) == 0))
+      iter++;
+  }
+
+  wmt_api->unref(wmt_ref);
+  munmap(mem, fsize);
+  const u64 rsize = bits_round_up(iter - mem, 12);
+  msstz_log(xdb->z, "%s fd %d fsize %lu rsize %lu nkeys %lu\n", __func__, fd, fsize, rsize, nkeys);
+  return rsize;
+}
+
+  static void
+xdb_recover(struct xdb * const xdb)
+{
+  struct wal * const wal = &xdb->wal;
+  const u64 zversion = msstz_version(xdb->z);
+  debug_assert(zversion); // >= 1
+  u64 vs[2] = {};
+  for (u32 i = 0; i < 2; i++) {
+    if (fdsize(wal->fds[i]) > sizeof(u64))
+      pread(wal->fds[i], &vs[i], sizeof(vs[i]), 0);
+  }
+
+  const bool two = (vs[0] >= zversion) && (vs[1] >= zversion);
+
+  // will recover fds[1] fist, then fds[0] if necessary, then keep using fds[0] since it's probably still half-full
+  if (vs[0] < vs[1]) { // swap
+    const u64 tmp = vs[0];
+    vs[0] = vs[1];
+    vs[1] = tmp;
+
+    const int fd1 = wal->fds[0];
+    wal->fds[0]= wal->fds[1];
+    wal->fds[1] = fd1;
+    wring_update_fd(wal->wring, wal->fds[0]);
+  }
+
+  debug_assert(wal->wring && wal->buf);
+
+  // do compaction now
+  if (two) {
+    const u64 v0 = msstz_version(xdb->z);
+    const u64 r1 = xdb_recover_fd(xdb, wal->fds[1]);
+    const u64 r0 = xdb_recover_fd(xdb, wal->fds[0]);
+    // compact everything
+    msstz_comp(xdb->z, imt_api, xdb->mt1, xdb->nr_workers, xdb->co_per_worker, 0);
+    // now the new version is safe
+    imt_api->clean(xdb->mt1);
+    ftruncate(wal->fds[1], 0);
+    ftruncate(wal->fds[0], 0);
+    // a fresh start
+    const u64 v1 = msstz_version(xdb->z);
+    memcpy(wal->buf, &v1, sizeof(v1));
+    wal->bufoff = sizeof(v1);
+    msstz_log(xdb->z, "%s log comp v0 %lu v1 %lu rec %lu %lu mtsz %lu fd %d\n", __func__, v0, v1, r1, r0, xdb->mtsz, wal->fds[0]);
+  } else { // one or zero
+    wal->woff = xdb_recover_fd(xdb, wal->fds[0]);
+    if (wal->woff == 0) { // record version for empty wal file
+      const u64 v1 = msstz_version(xdb->z);
+      memcpy(wal->buf, &v1, sizeof(v1));
+      wal->bufoff = sizeof(v1);
+      msstz_log(xdb->z, "%s log empty v %lu mtsz %lu fd %d\n", __func__, v1, xdb->mtsz, wal->fds[0]);
+    } else {
+      msstz_log(xdb->z, "%s log nbytes %lu mtsz %lu fd %d\n", __func__, wal->woff, xdb->mtsz, wal->fds[0]);
+    }
+    ftruncate(wal->fds[1], 0);
+  }
+  wal->soff = wal->woff;
+}
+
   struct xdb *
 xdb_open(const char * const dir, const size_t cache_size_mb, const size_t mt_size_mb, const size_t wal_size_mb,
     const u32 nr_workers, const u32 co_per_worker, const bool ckeys)
 {
-  mkdir(dir, 0777);
-  struct xdb * xdb = yalloc(sizeof(*xdb));
+  mkdir(dir, 00755);
+  struct xdb * const xdb = yalloc(sizeof(*xdb));
+  if (!xdb)
+    return NULL;
+
   memset(xdb, 0, sizeof(*xdb));
 
   const struct kvmap_mm mm_mt = { .in = kvmap_mm_in_noop, .out = kvmap_mm_out_noop, .free = kvmap_mm_free_free};
@@ -532,7 +772,6 @@ xdb_open(const char * const dir, const size_t cache_size_mb, const size_t mt_siz
   xdb->mt1 = wormhole_create(&mm_mt);
   xdb->mt2 = wormhole_create(&mm_mt);
 
-  // normal: one mt
   xdb->mt_views[0] = (struct mt_pair){.wmt = xdb->mt1, .next = &xdb->mt_views[1]};
   xdb->mt_views[1] = (struct mt_pair){.wmt = xdb->mt2, .imt = xdb->mt1, .next = &xdb->mt_views[2]};
 
@@ -540,6 +779,7 @@ xdb_open(const char * const dir, const size_t cache_size_mb, const size_t mt_siz
   xdb->mt_views[3] = (struct mt_pair){.wmt = xdb->mt1, .imt = xdb->mt2, .next = &xdb->mt_views[0]};
   xdb->version = xdb->mt_views; // [0]
 
+  xdb->z = msstz_open(dir, cache_size_mb, ckeys);
   xdb->qsbr = qsbr_create();
 
   // just a warning
@@ -548,20 +788,36 @@ xdb_open(const char * const dir, const size_t cache_size_mb, const size_t mt_siz
 
   // sz
   xdb->max_mtsz = mt_size_mb << 20;
+  xdb->wal.maxsz = wal_size_mb << 20;
   xdb->max_rejsz = xdb->max_mtsz >> XDB_REJECT_SIZE_SHIFT;
-  wal_init(&xdb->wal, dir, wal_size_mb << 20);
-
-  // z
-  struct msstz * z = msstz_open(dir, cache_size_mb, ckeys);
-  debug_assert(z);
-  xdb->z = z;
 
   mutex_init(&xdb->lock);
   xdb->nr_workers = nr_workers; // internal parallelism
   xdb->co_per_worker = co_per_worker;
   xdb->running = true;
-  pthread_create(&xdb->comp_pid, NULL, xdb_compaction_worker, xdb);
-  return xdb;
+
+  const bool wal_ok = wal_open(&xdb->wal, dir);
+  const bool all_ok = xdb->mt1 && xdb->mt2 && xdb->z && xdb->qsbr && wal_ok;
+  if (all_ok) {
+    xdb_recover(xdb); // no errors in recover
+
+    // start the main compaction worker
+    pthread_create(&xdb->comp_pid, NULL, xdb_compaction_worker, xdb); // should return 0
+    return xdb;
+  } else { // failed
+    if (xdb->mt1)
+      wormhole_destroy(xdb->mt1);
+    if (xdb->mt2)
+      wormhole_destroy(xdb->mt2);
+    if (xdb->z)
+      msstz_destroy(xdb->z);
+    if (xdb->qsbr)
+      qsbr_destroy(xdb->qsbr);
+    if (wal_ok)
+      wal_close(&xdb->wal);
+    free(xdb);
+    return NULL;
+  }
 }
 
 // destroy
@@ -659,7 +915,7 @@ xdb_probe(struct xdb_ref * const ref, const struct kref * const kref)
   static void
 xdb_write_enter(struct xdb_ref * const ref)
 {
-  struct xdb * xdb = ref->xdb;
+  struct xdb * const xdb = ref->xdb;
   while (xdb_mt_wal_full(xdb)) {
     xdb_ref_update_version(ref);
     usleep(10);
@@ -732,14 +988,23 @@ xdb_del(struct xdb_ref * const ref, const struct kref * const kref)
 
   return xdb_update(ref, kref, ts_kv);
 }
+
+  void
+xdb_sync(struct xdb_ref * const ref)
+{
+  struct xdb * const xdb = ref->xdb;
+  xdb_lock(xdb);
+  wal_flush_buf_sync(&xdb->wal);
+  xdb_unlock(xdb);
+}
 // }}} set del
 
 // iter {{{
   static void
 xdb_iter_miter_ref(struct xdb_iter * const iter)
 {
-  struct xdb_ref * ref = iter->db_ref;
-  struct mt_pair * version = ref->version;
+  struct xdb_ref * const ref = iter->db_ref;
+  struct mt_pair * const version = ref->version;
   iter->version = version; // remember version used by miter
 
   miter_add(iter->miter, &kvmap_api_msstv_ts, ref->v);
@@ -753,7 +1018,7 @@ xdb_iter_miter_ref(struct xdb_iter * const iter)
   static void
 xdb_iter_update_version(struct xdb_iter * const iter)
 {
-  struct xdb_ref * ref = iter->db_ref;
+  struct xdb_ref * const ref = iter->db_ref;
   if (ref->version == ref->xdb->version && iter->version == ref->version)
     return;
 
@@ -766,7 +1031,7 @@ xdb_iter_update_version(struct xdb_iter * const iter)
   struct xdb_iter *
 xdb_iter_create(struct xdb_ref * const ref)
 {
-  struct xdb_iter * iter = calloc(1, sizeof(*iter));
+  struct xdb_iter * const iter = calloc(1, sizeof(*iter));
   iter->miter = miter_create();
   iter->db_ref = ref;
 
@@ -846,7 +1111,7 @@ xdb_iter_skip(struct xdb_iter * const iter, const u32 n)
   struct kv *
 xdb_iter_next(struct xdb_iter * const iter, struct kv * const out)
 {
-  struct kv * kv = xdb_iter_peek(iter, out);
+  struct kv * const kv = xdb_iter_peek(iter, out);
   xdb_iter_skip(iter, 1);
   return kv;
 }
@@ -902,8 +1167,8 @@ __attribute__((constructor))
   static void
 xdb_kvmap_api_init(void)
 {
-  kvmap_api_register(2, "xdb", "<path> <cache-size-mb>", xdb_kvmap_api_create, &kvmap_api_xdb);
-  kvmap_api_register(7, "xdbx", "<path> <cache-size-mb> <mt-size-mb> <wal-size-mb> <nr-workers> <co-per-worker> <copy-keys(0/1)>",
+  kvmap_api_register(2, "xdb", "<path> <cache-mb>", xdb_kvmap_api_create, &kvmap_api_xdb);
+  kvmap_api_register(7, "xdbx", "<path> <cache-mb> <mt-mb> <wal-mb> <nr-workers> <co-per-worker> <copy-keys(0/1)>",
       xdb_kvmap_api_create, &kvmap_api_xdb);
 }
 // }}}
@@ -1022,6 +1287,12 @@ remixdb_get(struct xdb_ref * const ref, const void * const kbuf, const u32 klen,
   }
   // not in log, maybe in ssts
   return msstv_get_value_ts(ref->vref, &kref, vbuf_out, vlen_out);
+}
+
+  void
+remixdb_sync(struct xdb_ref * const ref)
+{
+  return xdb_sync(ref);
 }
 
   struct xdb_iter *
