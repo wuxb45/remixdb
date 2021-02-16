@@ -81,9 +81,9 @@ If you run it again without deleting `/tmp/xdbtest`, it will show non-zero error
 ## xdbexit
 
 `xdbexit` is a simple program testing crash-recovery. Run it repeatedly. In each run it should show that all the previously inserted KVs are found.
-Internally, it inserts some new keys and calls `remixdb_sync()` to make all buffered data persist in the WAL. Then it just call `exit()` without any clean up.
+Internally, it inserts some new keys and calls `remixdb_sync()` to make all buffered data persist in the WAL. Then it just calls `exit()` without any cleanup.
 
 ## libremixdb.so
 
 To use remixdb as a shared library, run `make libremixdb.so` and `make install`.
-A PKGBUILD (for Archliunx's pacman) is included as an example packaging script.
+A PKGBUILD (for Archlinux's pacman) is included as an example packaging script.

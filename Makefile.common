@@ -118,12 +118,12 @@ else ifeq ($(CCC),gcc)
 endif
 CCINC = /usr/include /usr/local/include
 
-ifneq ($(shell find $(CCINC) -name backtrace-supported.h),)
+ifneq ($(shell find $(CCINC) -name backtrace-supported.h 2>/dev/null),)
   LIB += backtrace
   FLG += -DBACKTRACE
 endif
 
-ifneq ($(shell find $(CCINC) -name liburing.h),)
+ifneq ($(shell find $(CCINC) -name liburing.h 2>/dev/null),)
   LIB += uring
   FLG += -DLIBURING
 endif

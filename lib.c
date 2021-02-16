@@ -1048,21 +1048,25 @@ thread_create_at(const u32 cpu, pthread_t * const thread, void *(*start_routine)
 
 // spinlock {{{
 #if defined(__linux__)
-static_assert(sizeof(pthread_spinlock_t) <= sizeof(spinlock), "spinlock size");
-#else // __linux__
-static_assert(sizeof(au32) <= sizeof(spinlock), "spinlock size");
+#define SPINLOCK_PTHREAD
 #endif // __linux__
 
-  inline void
+#if defined(SPINLOCK_PTHREAD)
+static_assert(sizeof(pthread_spinlock_t) <= sizeof(spinlock), "spinlock size");
+#else // SPINLOCK_PTHREAD
+static_assert(sizeof(au32) <= sizeof(spinlock), "spinlock size");
+#endif // SPINLOCK_PTHREAD
+
+  void
 spinlock_init(spinlock * const lock)
 {
-#if defined(__linux__)
+#if defined(SPINLOCK_PTHREAD)
   pthread_spinlock_t * const p = (typeof(p))lock;
   pthread_spin_init(p, PTHREAD_PROCESS_PRIVATE);
-#else // __linux__
+#else // SPINLOCK_PTHREAD
   au32 * const p = (typeof(p))lock;
   atomic_store_explicit(p, 0, MO_RELEASE);
-#endif // __linux__
+#endif // SPINLOCK_PTHREAD
 }
 
   inline void
@@ -1073,44 +1077,46 @@ spinlock_lock(spinlock * const lock)
   while (!spinlock_trylock(lock))
     corr_yield();
 #else // CORR
-#if defined(__linux__)
+#if defined(SPINLOCK_PTHREAD)
   pthread_spinlock_t * const p = (typeof(p))lock;
   pthread_spin_lock(p); // return value ignored
-#else // __linux__
+#else // SPINLOCK_PTHREAD
   au32 * const p = (typeof(p))lock;
+#pragma nounroll
   do {
     if (atomic_fetch_sub_explicit(p, 1, MO_ACQUIRE) == 0)
       return;
+#pragma nounroll
     do {
       cpu_pause();
     } while (atomic_load_explicit(p, MO_CONSUME));
   } while (true);
-#endif // __linux__
+#endif // SPINLOCK_PTHREAD
 #endif // CORR
 }
 
   inline bool
 spinlock_trylock(spinlock * const lock)
 {
-#if defined(__linux__)
+#if defined(SPINLOCK_PTHREAD)
   pthread_spinlock_t * const p = (typeof(p))lock;
   return !pthread_spin_trylock(p);
-#else // __linux__
+#else // SPINLOCK_PTHREAD
   au32 * const p = (typeof(p))lock;
   return atomic_fetch_sub_explicit(p, 1, MO_ACQUIRE) == 0;
-#endif // __linux__
+#endif // SPINLOCK_PTHREAD
 }
 
   inline void
 spinlock_unlock(spinlock * const lock)
 {
-#if defined(__linux__)
+#if defined(SPINLOCK_PTHREAD)
   pthread_spinlock_t * const p = (typeof(p))lock;
   pthread_spin_unlock(p); // return value ignored
-#else // __linux__
+#else // SPINLOCK_PTHREAD
   au32 * const p = (typeof(p))lock;
   atomic_store_explicit(p, 0, MO_RELEASE);
-#endif // __linux__
+#endif // SPINLOCK_PTHREAD
 }
 // }}} spinlock
 

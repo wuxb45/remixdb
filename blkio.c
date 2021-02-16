@@ -50,12 +50,15 @@ struct wring {
   struct wring *
 wring_create(const int fd, const size_t iosz, const u32 depth0)
 {
-  const u32 depth = depth0 < 512 ? bits_p2_up_u32(depth0) : 512;
+  debug_assert(depth0);
 #if defined(BLKIO_URING)
+  const u32 depth = depth0 < 64 ? bits_p2_up_u32(depth0) : 64;
   struct wring * const wring = calloc(1, sizeof(*wring));
-#else
+#else // POSIX AIO
+  const u32 depth = depth0 < 8 ? bits_p2_up_u32(depth0) : 8;
   struct wring * const wring = calloc(1, sizeof(*wring) + (sizeof(wring->aring[0]) * depth));
 #endif // BLKIO_URING
+
   if (!wring)
     return NULL;
   const size_t memsz = bits_round_up(iosz * depth, 21); // a multiple of 2MB
@@ -94,7 +97,6 @@ wring_create(const int fd, const size_t iosz, const u32 depth0)
 #else
   wring->off_mask = depth - 1;
 #endif // BLKIO_URING
-
   return wring;
 }
 
@@ -102,11 +104,13 @@ wring_create(const int fd, const size_t iosz, const u32 depth0)
 wring_update_fd(struct wring * const wring, const int fd)
 {
   wring->fd = fd;
+#if defined(BLKIO_URING)
   if (wring->fixed_file) {
     const int r = io_uring_register_files_update(&wring->uring, 0, &wring->fd, 1);
     if (r != 1)
       wring->fixed_file = false;
   }
+#endif // BLKIO_URING
 }
 
   void
@@ -136,21 +140,23 @@ wring_wait(struct wring * const wring)
     debug_die();
 
   void * const ptr = io_uring_cqe_get_data(cqe);
-  //debug_assert(((u64)ptr >= (u64)wring->mem) && ((u64)ptr < ((u64)wring->mem + (wring->iosz * wring->depth))));
-  //printf("%s %p [%lu]\n", __func__, ptr, (u64)(ptr - wring->mem) / wring->iosz);
   io_uring_cqe_seen(&wring->uring, cqe);
   wring->nring--;
 #else // AIO
   debug_assert(wring->off_submit != wring->off_finish);
   const u32 i = wring->off_finish & wring->off_mask;
+  struct aiocb * const cb = &(wring->aring[i].aiocb);
   do {
-    const int r = aio_error(&(wring->aring[i].aiocb));
+    const int r = aio_error(cb);
     if (r == 0)
       break;
     else if (r != EINPROGRESS)
       debug_die_perror();
     cpu_pause();
   } while (true);
+  const ssize_t ret = aio_return(cb);
+  if (ret != (ssize_t)cb->aio_nbytes)
+    debug_die();
   void * const ptr = wring->aring[i].data;
   wring->off_finish++;
 #endif // BLKIO_URING
@@ -175,7 +181,6 @@ wring_acquire(struct wring * const wring)
   // use the free list
   void * const ptr = wring->head;
   debug_assert(ptr);
-  //printf("%s %p [%lu]\n", __func__, ptr, (u64)(ptr - wring->mem) / wring->iosz);
   wring->head = (void *)(*(u64*)ptr);
   return ptr;
 }
