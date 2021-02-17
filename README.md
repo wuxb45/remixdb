@@ -15,6 +15,8 @@ TODO: store every huge value in a separate file and record the file name as the 
 # Optimization: Minimizing REMIX (Re-)Building Cost
 
 This implementation employs an optimization to minimize the REMIX building cost.
+This optimization improves the throughput by 2x (0.96MOPS vs. 0.50MOPS) in a random-write experiment, compared to the implementation described in the REMIX paper.
+Configuration: klen=16; vlen=120; 2.02 billion KVs; 256GB valid KV data; single-threaded loading in random order; no compression.
 
 When creating a new table file, RemixDB can create a copy of all the keys in the table.
 Specificially, it encodes all the keys (without values) in sorted order using prefix compression, which creates a *Compressed Keys Block* (*CKB*).
