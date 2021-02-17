@@ -63,25 +63,26 @@ To compile and run the demo code:
 
 ## xdbtest
 
-`xdbtest` is a stress test program that uses the `xdb_*` functions in `xdb.c`.
-The `remixdb_*` functions are thin wrappers of the `xdb_*` functions.
+`xdbtest` is a stress test program that uses the `remixdb_*` functions.
 
 Run with a 4GB block cache, 4GB MemTables, and a dataset with 32 million KVs:
 
     $ make xdbtest.out
     $ ./xdbtest.out /tmp/xdbtest 4096 25 30
 
-If your memory (tmpfs) is small (a 256MB block cache, 256MB Memtables, and 1 million KVs):
+If your memory is small, run with smaller sizes (a 256MB block cache, 256MB Memtables, and 1 million KVs):
 
     $ ./xdbtest.out /tmp/xdbtest 256 20 30
 
-The first run of xdbtest.out should always show errors=0.
-If you run it again without deleting `/tmp/xdbtest`, it will show non-zero error counts but the count will quickly drop and eventually reach zero.
+The first run of xdbtest.out should always show stale=0.
+If you run it again without deleting `/tmp/xdbtest`, it will show non-zero stale numbers at the beginning but it will quickly drop and eventually reach zero.
 
 ## xdbexit
 
-`xdbexit` is a simple program testing crash-recovery. Run it repeatedly. In each run it should show that all the previously inserted KVs are found.
-Internally, it inserts some new keys and calls `remixdb_sync()` to make all buffered data persist in the WAL. Then it just calls `exit()` without any cleanup.
+`xdbexit` is a simple program testing crash-recovery.
+It inserts some new keys and calls `remixdb_sync()` to make all buffered data persist in the WAL.
+Then it immediately calls `exit()` without doing any clean-up.
+Run it repeatedly. In each run it should show that all the previously inserted KVs are found.
 
 ## libremixdb.so
 

@@ -1847,7 +1847,7 @@ mssty_get_value_ts(struct mssty_ref * const ref, const struct kref * const key,
   sst_iter_fix_kv(iter1);
   const bool r = sst_iter_match_kref(iter1, key);
   if (r) {
-    memcpy(vbuf_out, iter1->kvdata, iter1->vlen);
+    memcpy(vbuf_out, iter1->kvdata + iter1->klen, iter1->vlen);
     *vlen_out = iter1->vlen;
   }
   sst_iter_park(iter1); // seek can only acquire iter1

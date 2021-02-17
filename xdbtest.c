@@ -10,97 +10,109 @@
 #include "sst.h"
 #include "xdb.h"
 
-static u8 * baseline = NULL;
-static u64 minerr = 0;
+static u8 * magics = NULL;
+static u64 minstale = 0;
 
   static void
-run_epoch(void * const xdb, const u32 epoch, const u64 range)
+run_update(struct xdb * const xdb, const u32 epoch, const u64 range)
 {
-  const struct kvmap_api* api = &kvmap_api_xdb;
+  struct xdb_ref * const ref = remixdb_ref(xdb);
   const u64 mask = range - 1;
-  struct kv * const tmp = calloc(1, 1lu << 16);
-  struct kv * const out = calloc(1, 1lu << 16);
-  memset(tmp, random_u64(), 1lu << 16);
-  struct kref kref;
-  void * const ref = api->ref(xdb);
+  u8 ktmp[16];
+  u8 * const vtmp = calloc(1, 1lu << 16);
+  memset(vtmp, random_u64(), 1lu << 16);
 
-#define SET_NR ((10000000))
   // set/del
-  const double a0 = time_sec();
+  const double t0 = time_sec();
+#define SET_NR ((10000000))
   for (u32 i = 0; i < SET_NR; i++) { // 10M operations
     const u64 r = random_u64();
     const u64 k = (r >> 8) & mask;
     const u8 v = r & 0xff;
-    kv_refill_hex64_klen(tmp, k, 16, NULL, 0);
-    tmp->kv[16] = v;
-    baseline[k] = v;
+    vtmp[0] = v;
+    magics[k] = v;
+    strhex_64(ktmp, k);
 
     if (v == 0) { // delete
-      kref_ref_kv(&kref, tmp);
-      api->del(ref, &kref);
-    } else {
-      tmp->vlen = ((i & 0x3fffu) != 0x1357u) ? ((r & 0xf0) + 100) : (((r & 0xf0) << 6) + 4200);
-      api->set(ref, tmp);
+      remixdb_del(ref, ktmp, 16);
+    } else { // update
+      const u32 vlen = ((i & 0x3fffu) != 0x1357u) ? ((r & 0xf0) + 100) : (((r & 0xf0) << 6) + 4200);
+      remixdb_set(ref, ktmp, 16, vtmp, vlen);
     }
   }
-  const double da = time_diff_sec(a0);
+
+  const double dt = time_diff_sec(t0);
+  char ts[64];
+  time_stamp(ts, sizeof(ts));
+  printf("[%3u] %s put/del dt %6.3lf mops %6.3lf\n", epoch, ts, dt, (double)SET_NR / dt * 1e-6);
+
+  remixdb_unref(ref);
+  free(vtmp);
+}
+
+  static void
+run_getscan(struct xdb * const xdb, const u32 epoch, const u64 range)
+{
+  struct xdb_ref * const ref = remixdb_ref(xdb);
+  u8 ktmp[16];
+  u8 * const out = calloc(1, 1lu << 16);
+  u32 vlen_out;
 
   // get
-  const double b0 = time_sec();
-  u64 err = 0;
-  u64 nr = 0;
+  u64 stale = 0;
+  u64 nr = 0; // to count the expected number of keys
+  const double t0 = time_sec();
   for (u64 i = 0; i < range; i++) { // range operations
-    kv_refill_hex64_klen(tmp, i, 16, NULL, 0);
-    kref_ref_kv(&kref, tmp);
-    struct kv * const ret = api->get(ref, &kref, out);
-    if ((ret ? ret->kv[16] : 0) != baseline[i])
-      err++;
-    if (baseline[i])
+    strhex_64(ktmp, i);
+    const bool r = remixdb_get(ref, ktmp, 16, out, &vlen_out);
+    if ((r ? out[0] : 0) != magics[i])
+      stale++;
+    if (magics[i])
       nr++;
   }
-  const double db = time_diff_sec(b0);
-  if (err > minerr)
+  const double dt = time_diff_sec(t0);
+  if (stale > minstale)
     debug_die();
-  minerr = err;
+  minstale = stale;
 
-  // count
-  u64 cnt = 0;
-  for (u64 i = 0; i < range; i++) {
-    if (baseline[i])
-      cnt++;
-  }
-
+  // scan
   u64 nr1 = 0;
-  void * const iter = api->iter_create(ref);
-  struct kv * const kv1 = malloc(64);
-  struct kref kref1;
-  for (u64 i = 0; i < 64; i++) {
-    const u64 k0 = (range >> 6) * i;
-    kv_refill_hex64_klen(tmp, k0, 16, NULL, 0);
-    kref_ref_kv(&kref, tmp);
-    api->iter_seek(iter, &kref);
-    const u64 k1 = (range >> 6) * (i+1);
-    kv_refill_hex64_klen(kv1, k1, 16, NULL, 0);
-    kref_ref_kv(&kref1, kv1);
-    while (api->iter_valid(iter)) {
-      api->iter_kref(iter, &kref);
-      if (kref_compare(&kref, &kref1) < 0) {
+  u32 klen_out;
+  struct xdb_iter * const iter = remixdb_iter_create(ref);
+  for (u64 i = 0; i < 1024; i++) {
+    // seek to the first
+    const u64 k0 = (range >> 10) * i;
+    strhex_64(ktmp, k0);
+    remixdb_iter_seek(iter, ktmp, 16);
+    memset(ktmp, 0, 16);
+
+    // prepare the end
+    const u64 k1 = (range >> 10) * (i+1);
+    u8 kend[16];
+    strhex_64(kend, k1);
+
+    // scan
+    while (remixdb_iter_valid(iter)) {
+      remixdb_iter_peek(iter, ktmp, &klen_out, NULL, NULL);
+      debug_assert(klen_out == 16);
+      if (memcmp(ktmp, kend, 16) < 0) {
         nr1++;
-        api->iter_skip(iter, 1);
+        remixdb_iter_skip(iter, 1);
       } else {
         break;
       }
     }
   }
-  free(kv1);
 
-  api->iter_destroy(iter);
-  (void)api->unref(ref);
   char ts[64];
   time_stamp(ts, sizeof(ts));
-  printf("[%3u] %s put/del dt %6.3lf mops %6.3lf probe dt %6.3lf mops %6.3lf nr %lu==%lu/%lu err %lu\n",
-      epoch, ts, da, (double)SET_NR / da * 1e-6, db, (double)range / db * 1e-6, nr, nr1, range, err);
-  free(tmp);
+  printf("[%3u] %s probe dt %6.3lf mops %6.3lf expected %lu found %lu stale %lu\n",
+      epoch, ts, dt, (double)range / dt * 1e-6, nr, nr1, stale);
+  if (nr + stale != nr1)
+    printf("error: expected + stale != found\n");
+
+  remixdb_iter_destroy(iter);
+  remixdb_unref(ref);
   free(out);
 }
 
@@ -108,8 +120,8 @@ run_epoch(void * const xdb, const u32 epoch, const u64 range)
 main(int argc, char** argv)
 {
   if (argc < 4) {
-    printf("Usage: <dirname> <mem-size-mb> <power> [<epochs>]\n");
-    printf("    Block cache and MemTable(s) will use <mem-size-mb>; the actual usage can be 3*mb\n");
+    printf("Usage: <dirname> <mem-mb> <power> [<epochs>]\n");
+    printf("    Block cache and MemTable(s) will use <mem-mb>; the actual usage can be 3*mb\n");
     printf("    WAL size = 2*mb\n");
     return 0;
   }
@@ -120,32 +132,33 @@ main(int argc, char** argv)
     printf("maximum power is 30\n");
     return 0;
   }
-  void * xdb = xdb_open(argv[1], memsz, memsz, memsz<<1, 4, 1, true);
+  struct xdb * xdb = remixdb_open(argv[1], memsz, memsz);
   if (!xdb) {
     fprintf(stderr, "xdb_open failed\n");
     return 0;
   }
 
   const u64 range = 1lu << power;
-  minerr = range;
-  baseline = calloc(range, 1);
-  debug_assert(baseline);
+  minstale = range;
+  magics = calloc(range, 1);
+  debug_assert(magics);
   const u32 ne = (argc < 5) ? 1000000 : a2u32(argv[4]);
 
   for (u32 e = 0; e < ne; e++) { // epoch
-    run_epoch(xdb, e, range);
-    if ((e & 0xfu) == 0xfu) { // close/open every 16 epochs
-      xdb_close(xdb);
-      xdb = xdb_open(argv[1], memsz, memsz, memsz<<1, (e & 3) + 1, 1, (e&1) == 0);
+    run_update(xdb, e, range);
+    if ((e & 0x7u) == 0x7u) { // close/open every 8 epochs
+      remixdb_close(xdb);
+      xdb = (e&1) ? remixdb_open(argv[1], memsz, memsz) : remixdb_open_compact(argv[1], memsz, memsz);
       if (xdb) {
-        printf("reopen xdb ok\n");
+        printf("reopen remixdb ok\n");
       } else {
-        printf("xdb_open failed\n");
-        return 0;
+        printf("reopen failed\n");
+        exit(0);
       }
     }
+    run_getscan(xdb, e, range);
   }
-  free(baseline);
-  xdb_close(xdb);
+  free(magics);
+  remixdb_close(xdb);
   return 0;
 }
