@@ -7,6 +7,7 @@
 -K remixdb_del
 -K remixdb_get
 -K remixdb_probe
+-K remixdb_sync
 -K remixdb_iter_create
 -K remixdb_iter_destroy
 -K remixdb_iter_valid
