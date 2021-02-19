@@ -4,11 +4,12 @@
  * All rights reserved. No warranty, explicit or implicit, provided.
  */
 #pragma once
+
+#include "blkio.h"
+
 #ifdef __cplusplus
 extern "C" {
 #endif
-
-#include "blkio.h"
 
 #define SST_VLEN_TS ((0x10000u)) // tomb stone
 #define SST_VLEN_MASK ((0xffffu)) // real vlen == vlen & 0xffff

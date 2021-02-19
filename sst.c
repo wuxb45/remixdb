@@ -10,7 +10,7 @@
 #include "ctypes.h"
 #include "kv.h"
 #include <assert.h> // static_assert
-#include <dirent.h> // dirfd
+#include <dirent.h> // opendir
 #include <stdarg.h> // va_start
 #include <sys/uio.h> // writev
 #include "sst.h"
@@ -191,12 +191,12 @@ struct sst {
 };
 
   static bool
-sst_init_at(const int dirfd, const u64 seq, const u32 way, struct sst * const sst)
+sst_init_at(const int dfd, const u64 seq, const u32 way, struct sst * const sst)
 {
   char fn[24];
   const u64 magic = seq * 100lu + way;
   sprintf(fn, "%03lu.sstx", magic);
-  const int fd = openat(dirfd, fn, O_RDONLY);
+  const int fd = openat(dfd, fn, O_RDONLY);
   if (fd < 0)
     return false;
 
@@ -245,12 +245,12 @@ sst_rcache(struct sst * const sst, struct rcache * const rc)
 }
 
   static struct sst *
-sst_open_at(const int dirfd, const u64 seq, const u32 way)
+sst_open_at(const int dfd, const u64 seq, const u32 way)
 {
   struct sst * const sst = yalloc(sizeof(*sst));
   if (sst == NULL)
     return NULL;
-  if (sst_init_at(dirfd, seq, way, sst)) {
+  if (sst_init_at(dfd, seq, way, sst)) {
     return sst;
   } else {
     free(sst);
@@ -261,11 +261,11 @@ sst_open_at(const int dirfd, const u64 seq, const u32 way)
   struct sst *
 sst_open(const char * const dirname, const u64 seq, const u32 way)
 {
-  const int dirfd = open(dirname, O_RDONLY|O_DIRECTORY);
-  if (dirfd < 0)
+  const int dfd = open(dirname, O_RDONLY|O_DIRECTORY);
+  if (dfd < 0)
     return NULL;
-  struct sst * const sst = sst_open_at(dirfd, seq, way);
-  close(dirfd);
+  struct sst * const sst = sst_open_at(dfd, seq, way);
+  close(dfd);
   return sst;
 }
 
@@ -625,14 +625,14 @@ kvenc_destroy(struct kvenc * const enc)
 // warning: all iters in miter must handle the tombstone (vlen >= SST_VLEN_TS)
 // return the output file size (in bytes)
   static u64
-sst_build_at(const int dirfd, struct miter * const miter,
+sst_build_at(const int dfd, struct miter * const miter,
     const u64 seq, const u32 way, const u32 maxblks, const bool del, const bool ckeys,
     const struct kv * const k0, const struct kv * const kz)
 {
   char fn[24];
   const u64 magic = seq * 100lu + way;
   sprintf(fn, "%03lu.sstx", magic);
-  const int fdout = openat(dirfd, fn, O_WRONLY|O_CREAT|O_TRUNC, 00644);
+  const int fdout = openat(dfd, fn, O_WRONLY|O_CREAT|O_TRUNC, 00644);
   if (fdout < 0)
     return 0;
 
@@ -827,11 +827,11 @@ sst_build(const char * const dirname, struct miter * const miter,
     const u64 seq, const u32 way, const u32 maxblks, const bool del, const bool ckeys,
     const struct kv * const k0, const struct kv * const kz)
 {
-  const int dirfd = open(dirname, O_RDONLY|O_DIRECTORY);
-  if (dirfd < 0)
+  const int dfd = open(dirname, O_RDONLY|O_DIRECTORY);
+  if (dfd < 0)
     return 0;
-  const u64 ret = sst_build_at(dirfd, miter, seq, way, maxblks, del, ckeys, k0, kz);
-  close(dirfd);
+  const u64 ret = sst_build_at(dfd, miter, seq, way, maxblks, del, ckeys, k0, kz);
+  close(dfd);
   return ret;
 }
 // }}} sst_build
@@ -1160,7 +1160,7 @@ struct msstx_iter {
 };
 
   static struct msst *
-msstx_open_at_reuse(const int dirfd, const u64 seq, const u32 nway, struct msst * const msst0, const u32 nway0)
+msstx_open_at_reuse(const int dfd, const u64 seq, const u32 nway, struct msst * const msst0, const u32 nway0)
 {
   if (nway > MSST_NWAY)
     return NULL;
@@ -1177,7 +1177,7 @@ msstx_open_at_reuse(const int dirfd, const u64 seq, const u32 nway, struct msst 
   }
 
   for (u32 i = nway0; i < nway; i++) {
-    if (!sst_init_at(dirfd, seq, i, &(msst->ssts[i])))
+    if (!sst_init_at(dfd, seq, i, &(msst->ssts[i])))
       goto fail_sst;
   }
   msst->seq = seq;
@@ -1194,19 +1194,19 @@ fail_sst:
 }
 
   static struct msst *
-msstx_open_at(const int dirfd, const u64 seq, const u32 nway)
+msstx_open_at(const int dfd, const u64 seq, const u32 nway)
 {
-  return msstx_open_at_reuse(dirfd, seq, nway, NULL, 0);
+  return msstx_open_at_reuse(dfd, seq, nway, NULL, 0);
 }
 
   inline struct msst *
 msstx_open(const char * const dirname, const u64 seq, const u32 nway)
 {
-  const int dirfd = open(dirname, O_RDONLY|O_DIRECTORY);
-  if (dirfd < 0)
+  const int dfd = open(dirname, O_RDONLY|O_DIRECTORY);
+  if (dfd < 0)
     return NULL;
-  struct msst * const msst = msstx_open_at_reuse(dirfd, seq, nway, NULL, 0);
-  close(dirfd);
+  struct msst * const msst = msstx_open_at_reuse(dfd, seq, nway, NULL, 0);
+  close(dfd);
   return msst;
 }
 
@@ -1464,7 +1464,6 @@ struct ssty_meta {
   u64 magic;
 };
 
-
 struct ssty {
   union {
     u8 * mem; // and the array
@@ -1484,12 +1483,12 @@ struct ssty {
 };
 
   static struct ssty *
-ssty_open_at(const int dirfd, const u64 seq, const u32 nway)
+ssty_open_at(const int dfd, const u64 seq, const u32 nway)
 {
   char fn[16];
   const u64 magic = seq * 100lu + nway;
   sprintf(fn, "%03lu.ssty", magic);
-  const int fd = openat(dirfd, fn, O_RDONLY);
+  const int fd = openat(dfd, fn, O_RDONLY);
   if (fd < 0)
     return NULL;
   struct stat st;
@@ -1527,11 +1526,11 @@ fail:
   struct ssty *
 ssty_open(const char * const dirname, const u64 seq, const u32 nway)
 {
-  const int dirfd = open(dirname, O_RDONLY|O_DIRECTORY);
-  if (dirfd < 0)
+  const int dfd = open(dirname, O_RDONLY|O_DIRECTORY);
+  if (dfd < 0)
     return NULL;
-  struct ssty * const ssty = ssty_open_at(dirfd, seq, nway);
-  close(dirfd);
+  struct ssty * const ssty = ssty_open_at(dfd, seq, nway);
+  close(dfd);
   return ssty;
 }
 
@@ -1552,16 +1551,17 @@ ssty_fprint(struct ssty * const ssty, FILE * const fout)
 }
 
   static u32
-ssty_ranks_mask(const u8 * const ranks, const u8 rank)
+ssty_ranks_match_mask(const u8 * const ranks, const u8 rank)
 {
 #if defined(__x86_64__)
+
 #if SSTY_DBITS == 5
 #if defined(__AVX2__)
   const m256 maskv = _mm256_set1_epi8(SSTY_RANK);
   const m256 rankv = _mm256_set1_epi8(rank);
   const m256 tmpv = _mm256_and_si256(_mm256_load_si256((const void *)ranks), maskv);
   return (u32)_mm256_movemask_epi8(_mm256_cmpeq_epi8(tmpv, rankv));
-#else
+#else // No __AVX2__, use SSE 4.2
   const m128 maskv = _mm_set1_epi8(SSTY_RANK);
   const m128 rankv = _mm_set1_epi8(rank);
   const m128 tmpv0 = _mm_and_si128(_mm_load_si128((const void *)ranks), maskv);
@@ -1576,29 +1576,43 @@ ssty_ranks_mask(const u8 * const ranks, const u8 rank)
   const m128 tmpv = _mm_and_si128(_mm_load_si128((const void *)ranks), maskv);
   return (u32)_mm_movemask_epi8(_mm_cmpeq_epi8(tmpv, rankv));
 #endif // SSTY_DBITS
-#else // __x86_64__
-  u32 bits = 0;
-  for (u32 i = 0; i < SSTY_DIST; i++)
-    if ((ranks[i] & SSTY_RANK) == rank)
-      bits |= (1u << i);
-  return bits;
+
+#elif defined(__aarch64__)
+  static const u8 vtbl[8] = {0, 8, 16, 24, 32, 32, 32, 32};
+  const m128 maskv = vdupq_n_u8(SSTY_RANK);
+  const m128 d = vdupq_n_u8(rank);
+#if SSTY_DBITS == 5
+  const m128 cmplo = vceqq_u8(vandq_u8(vld1q_u8(ranks), maskv), d); // cmpeq => 0xff or 0x00
+  const m128 cmphi = vceqq_u8(vandq_u8(vld1q_u8(ranks + sizeof(m128)), maskv), d); // cmpeq => 0xff or 0x00
+  const uint16x8_t sr1lo = vreinterpretq_u16_u8(vshrq_n_u8(cmplo, 7)); // 1-bit x16 => 0x1 or 0x0
+  const uint16x8_t sr1hi = vreinterpretq_u16_u8(vshrq_n_u8(cmphi, 7)); // 1-bit x16 => 0x1 or 0x0
+  const uint32x4_t sr2lo = vreinterpretq_u32_u16(vsraq_n_u16(sr1lo, sr1lo, 7)); // 2-bit x8 => 0x2|0x1 = 0x3
+  const uint32x4_t sr2hi = vreinterpretq_u32_u16(vsraq_n_u16(sr1hi, sr1hi, 7)); // 2-bit x8 => 0x2|0x1 = 0x3
+  const uint64x2_t sr4lo = vreinterpretq_u64_u32(vsraq_n_u32(sr2lo, sr2lo, 14)); // 4-bit x4 => 0xc|0x3 = 0xf
+  const uint64x2_t sr4hi = vreinterpretq_u64_u32(vsraq_n_u32(sr2hi, sr2hi, 14)); // 4-bit x4 => 0xc|0x3 = 0xf
+  const m128 sr8lo = vreinterpretq_u8_u64(vsraq_n_u64(sr4lo, sr4lo, 28)); // 8-bit x2 => 0xf0|0xf = 0xff
+  const m128 sr8hi = vreinterpretq_u8_u64(vsraq_n_u64(sr4hi, sr4hi, 28)); // 8-bit x2 => 0xf0|0xf = 0xff
+  const uint8x8_t rv = vqtbl2_u8((uint8x16x2_t){sr8lo, sr8hi}, vld1_u8(vtbl));
+  const u32 r = vget_lane_u32(vreinterpret_u32_u8(rv), 0);
+#elif SSTY_DBITS == 4
+  const m128 cmp = vceqq_u8(vandq_u8(vld1q_u8(ranks), maskv), d); // cmpeq => 0xff or 0x00
+  const uint16x8_t sr1 = vreinterpretq_u16_u8(vshrq_n_u8(cmp, 7)); // 1-bit x16 => 0x1 or 0x0
+  const uint32x4_t sr2 = vreinterpretq_u32_u16(vsraq_n_u16(sr1, sr1, 7)); // 2-bit x8 => 0x2|0x1 = 0x3
+  const uint64x2_t sr4 = vreinterpretq_u64_u32(vsraq_n_u32(sr2, sr2, 14)); // 4-bit x4 => 0xc|0x3 = 0xf
+  const m128 sr8 = vreinterpretq_u8_u64(vsraq_n_u64(sr4, sr4, 28)); // 8-bit x2 => 0xf0|0xf = 0xff
+  const uint8x8_t rv = vqtbl1_u8(sr8, vld1_u8(vtbl));
+  const u32 r = vget_lane_u32(vreinterpret_u32_u8(rv), 0);
+#endif // SSTY_DBITS
+  return r;
+
 #endif // __x86_64__
 }
 
   static u32
 ssty_ranks_count(const u8 * const ranks, const u32 nr, const u8 rank)
 {
-#if defined(__x86_64__)
-  const u32 mask = ssty_ranks_mask(ranks, rank) & (((u32)(1lu << nr)) - 1u);
+  const u32 mask = ssty_ranks_match_mask(ranks, rank) & (((u32)(1lu << nr)) - 1u);
   return (u32)__builtin_popcount(mask);
-#else
-  // TODO: aarch64 SIMD
-  u32 c = 0;
-  for (u32 i = 0; i < nr; i++)
-    if ((ranks[i] & SSTY_RANK) == rank)
-      c++;
-  return c;
-#endif
 }
 // }}} ssty
 
@@ -1615,10 +1629,10 @@ struct mssty_iter {
 };
 
   static bool
-mssty_open_y_at(const int dirfd, struct msst * const msst)
+mssty_open_y_at(const int dfd, struct msst * const msst)
 {
   debug_assert(msst->ssty == NULL);
-  struct ssty * const ssty = ssty_open_at(dirfd, msst->seq, msst->nway);
+  struct ssty * const ssty = ssty_open_at(dfd, msst->seq, msst->nway);
   msst->ssty = ssty;
   return ssty != NULL;
 }
@@ -1635,13 +1649,13 @@ mssty_open_y(const char * const dirname, struct msst * const msst)
 // naming convention example: seq=123, nway=8:
 // dir/12300.sstx, dir/12301.sstx, ..., dir/12307.sstx, dir/12308.ssty
   static struct msst *
-mssty_open_at(const int dirfd, const u64 seq, const u32 nway)
+mssty_open_at(const int dfd, const u64 seq, const u32 nway)
 {
-  struct msst * const msst = msstx_open_at(dirfd, seq, nway);
+  struct msst * const msst = msstx_open_at(dfd, seq, nway);
   if (msst == NULL)
     return NULL;
 
-  if (!mssty_open_y_at(dirfd, msst)) {
+  if (!mssty_open_y_at(dfd, msst)) {
     msstx_destroy(msst);
     return NULL;
   }
@@ -1652,12 +1666,12 @@ mssty_open_at(const int dirfd, const u64 seq, const u32 nway)
   struct msst *
 mssty_open(const char * const dirname, const u64 seq, const u32 nway)
 {
-  const int dirfd = open(dirname, O_RDONLY|O_DIRECTORY);
-  if (dirfd < 0)
+  const int dfd = open(dirname, O_RDONLY|O_DIRECTORY);
+  if (dfd < 0)
     return NULL;
 
-  struct msst * const msst = mssty_open_at(dirfd, seq, nway);
-  close(dirfd);
+  struct msst * const msst = mssty_open_at(dfd, seq, nway);
+  close(dfd);
   return msst;
 }
 
@@ -1912,7 +1926,6 @@ mssty_iter_seek_bisect(struct mssty_iter * const iter, const struct kref * const
   while (r && (ranks[r-1] & SSTY_STALE))
     r--;
 
-
   while (l < r) {
 #ifdef MSSTY_SEEK_BISECT_OPT
     const u8 rankx = ranks[(l+r)>>1] & SSTY_RANK;
@@ -1920,7 +1933,7 @@ mssty_iter_seek_bisect(struct mssty_iter * const iter, const struct kref * const
     mssty_iter_set_ptr(iterx, iter->seek_ptrs[rankx]);
     debug_assert(sst_iter_valid(iterx));
     // use 1lu << r to avoid undefined behavior of left-shift by 32
-    u32 mask = ssty_ranks_mask(ranks, rankx) & (((u32)(1lu << r)) - 1u);
+    u32 mask = ssty_ranks_match_mask(ranks, rankx) & (((u32)(1lu << r)) - 1u);
     debug_assert(l < SSTY_DIST);
     const u32 low = (1u << l) - 1u;
     const u32 nskip0 = __builtin_popcount(mask & low);
@@ -2442,7 +2455,7 @@ struct ssty_build_info {
   struct sst_ptr * ptrs; // output: cursor positions
   struct kv ** anchors; // output: anchors
 
-  int dirfd; // input
+  int dfd; // input
   u32 way0;  // input: number of ssts to reuse in y0
   u32 nkidx; // output: maximum key index
   u32 nsecs; // output: number of groups
@@ -2615,11 +2628,11 @@ static const struct kvmap_api kvmap_api_sstc = {
 };
 
   static bool
-msstb_use_ckeys(struct msst * const x1)
+msstb_use_ckeys(struct msst * const msstx1)
 {
   bool use_ckeys = true;
-  for (u32 i = 0; i < x1->nway; i++) {
-    const struct sst_meta * const meta = sst_meta(&(x1->ssts[i]));
+  for (u32 i = 0; i < msstx1->nway; i++) {
+    const struct sst_meta * const meta = sst_meta(&(msstx1->ssts[i]));
     if ((meta->totkv != 0) && (meta->ckeyssz == 0)) {
       use_ckeys = false;
       break;
@@ -2667,7 +2680,7 @@ struct msstb {
 };
 
 struct msstb_api {
-  struct msstb * (*create)  (struct msst * const x1, struct msst * const y0, const u32 way0);
+  struct msstb * (*create)  (struct msst * const msstx1, struct msst * const mssty0, const u32 way0);
   void (*ptrs)              (struct msstb * const b, struct sst_ptr * const ptrs_out);
   struct kv * (*anchor)     (struct msstb * const b);
   void (*skip1)             (struct msstb * const b);
@@ -2737,21 +2750,21 @@ msstbm_skip1(struct msstb * const b)
 }
 
   static struct msstb *
-msstbm_create(struct msst * const x1, struct msst * const y0, const u32 way0)
+msstbm_create(struct msst * const msstx1, struct msst * const mssty0, const u32 way0)
 {
-  (void)y0;
+  (void)mssty0;
   (void)way0;
   struct msstb * const b = calloc(1, sizeof(*b));
-  b->nway = x1->nway;
+  b->nway = msstx1->nway;
   b->idx = 0;
   b->tmp0 = malloc(sizeof(*b->tmp0) + SST_MAX_KVSZ);
   b->tmp1 = malloc(sizeof(*b->tmp1) + SST_MAX_KVSZ);
-  const bool use_ckeys = msstb_use_ckeys(x1);
+  const bool use_ckeys = msstb_use_ckeys(msstx1);
   const struct kvmap_api * const api_build = use_ckeys ? &kvmap_api_sstc : &kvmap_api_sst;
   struct miter * const miter = miter_create();
   b->miter = miter;
   for (u32 i = 0; i < b->nway; i++)
-    b->iters[i] = miter_add(miter, api_build, &x1->ssts[i]);
+    b->iters[i] = miter_add(miter, api_build, &msstx1->ssts[i]);
 
   miter_seek(miter, kref_null());
   if (miter_valid(miter)) {
@@ -2903,36 +2916,36 @@ msstb2_skip1(struct msstb * const b)
 }
 
   static struct msstb *
-msstb2_create_common(struct msst * const x1, struct msst * const y0, const u32 way0)
+msstb2_create_common(struct msst * const msstx1, struct msst * const mssty0, const u32 way0)
 {
-  debug_assert(x1);
+  debug_assert(msstx1);
   struct msstb * const b = calloc(1, sizeof(*b));
   if (!b)
     return NULL;
 
-  b->x1 = x1;
-  b->y0 = y0;
+  b->x1 = msstx1;
+  b->y0 = mssty0;
   b->way0 = way0;
   b->way1 = way0; // new tables start with way0
-  b->nway = x1->nway; // the target nway
+  b->nway = msstx1->nway; // the target nway
   b->newer.ptr.keyid = UINT16_MAX;
 
   if (way0) {
-    debug_assert(y0);
-    b->nkidx = y0->ssty->nkidx; // shortcut
-    b->ranks = y0->ssty->ranks; // shortcut
+    debug_assert(mssty0);
+    b->nkidx = mssty0->ssty->nkidx; // shortcut
+    b->ranks = mssty0->ssty->ranks; // shortcut
   }
   return b;
 }
 
   static struct msstb *
-msstb2_create(struct msst * const x1, struct msst * const y0, const u32 way0)
+msstb2_create(struct msst * const msstx1, struct msst * const mssty0, const u32 way0)
 {
-  struct msstb * const b = msstb2_create_common(x1, y0, way0);
+  struct msstb * const b = msstb2_create_common(msstx1, mssty0, way0);
   if (way0) {
-    mssty_iter_init(&(b->iterb), y0);
+    mssty_iter_init(&(b->iterb), mssty0);
     mssty_iter_seek_null(&(b->iterb));
-    mssty_iter_init(&(b->iter0), y0);
+    mssty_iter_init(&(b->iter0), mssty0);
     mssty_iter_seek_null(&(b->iter0));
     for (u32 i = 0; i < way0; i++)
       mssty_iter_fix_rank(&(b->iter0), i);
@@ -2944,10 +2957,10 @@ msstb2_create(struct msst * const x1, struct msst * const y0, const u32 way0)
 
   u32 newcnt = 0;
   for (u32 i = way0; i < b->nway; i++) {
-    b->iters[i] = sst_iter_create(&(x1->ssts[i]));
+    b->iters[i] = sst_iter_create(&(msstx1->ssts[i]));
     b->iters[i]->rank = i;
     sst_iter_seek_null(b->iters[i]);
-    newcnt += x1->ssts[i].totkv;
+    newcnt += msstx1->ssts[i].totkv;
   }
 
   // size ratio between the old and new sorted views; old:new, 1 <= ratio
@@ -3074,15 +3087,15 @@ msstbc_skip1(struct msstb * const b)
 }
 
   static struct msstb *
-msstbc_create(struct msst * const x1, struct msst * const y0, const u32 way0)
+msstbc_create(struct msst * const msstx1, struct msst * const mssty0, const u32 way0)
 {
-  struct msstb * const b = msstb2_create_common(x1, y0, way0);
+  struct msstb * const b = msstb2_create_common(msstx1, mssty0, way0);
 
   b->tmp0 = malloc(sizeof(*b->tmp0) + SST_MAX_KVSZ);
   b->tmp1 = malloc(sizeof(*b->tmp1) + SST_MAX_KVSZ);
 
   for (u32 i = 0; i < b->nway; i++) {
-    b->citers[i] = sstc_iter_create(&(x1->ssts[i]));
+    b->citers[i] = sstc_iter_create(&(msstx1->ssts[i]));
     b->citers[i]->iter.rank = i;
   }
   msstbc_sync_lo(b);
@@ -3113,30 +3126,30 @@ static const struct msstb_api msstb_api_bc = {
 // sort {{{
 // check if tables at way0 to nway overlap
   static const struct msstb_api *
-ssty_build_api(struct msst * const x1, const u32 way0)
+ssty_build_api(struct msst * const msstx1, const u32 way0)
 {
-  const u32 nway = x1->nway;
+  const u32 nway = msstx1->nway;
   struct kv * const last = malloc(sizeof(*last) + SST_MAX_KVSZ);
   struct kv * const tmp = malloc(sizeof(*last) + SST_MAX_KVSZ);
   last->klen = UINT32_MAX;
   bool overlap = false;
   for (u32 i = way0; (i+1) < nway; i++) {
-    if (x1->ssts[i].totkv == 0)
+    if (msstx1->ssts[i].totkv == 0)
       continue;
 
-    struct kv * const first = sst_first_key(&(x1->ssts[i]), tmp);
+    struct kv * const first = sst_first_key(&(msstx1->ssts[i]), tmp);
     if ((last->klen != UINT32_MAX) && (kv_compare(last, first) >= 0)) {
       overlap = true;
       break;
     }
-    sst_last_key(&(x1->ssts[i]), last);
+    sst_last_key(&(msstx1->ssts[i]), last);
   }
 
   free(last);
   free(tmp);
   if (overlap) {
     return &msstb_api_miter;
-  } else if (msstb_use_ckeys(x1)) {
+  } else if (msstb_use_ckeys(msstx1)) {
     return &msstb_api_bc;
   } else {
     return &msstb_api_b2;
@@ -3201,23 +3214,23 @@ ssty_build_sort_msstb(struct ssty_build_info * const bi)
 // main {{{
 // y0 and way0 are optional
   static u32
-ssty_build_at(const int dirfd, struct msst * const x1,
-    const u64 seq, const u32 nway, struct msst * const y0, const u32 way0)
+ssty_build_at(const int dfd, struct msst * const msstx1,
+    const u64 seq, const u32 nway, struct msst * const mssty0, const u32 way0)
 {
   // open ssty file for output
-  debug_assert(nway == x1->nway);
+  debug_assert(nway == msstx1->nway);
   char fn[24];
   const u64 magic = seq * 100lu + nway;
   sprintf(fn, "%03lu.ssty", magic);
-  const int fdout = openat(dirfd, fn, O_WRONLY|O_CREAT|O_TRUNC, 00644);
+  const int fdout = openat(dfd, fn, O_WRONLY|O_CREAT|O_TRUNC, 00644);
   if (fdout < 0)
     return 0;
 
   u32 totkv = 0;
   size_t totsz = 0;
   for (u32 i = 0; i < nway; i++) {
-    totkv += x1->ssts[i].totkv;
-    totsz += x1->ssts[i].fsize;
+    totkv += msstx1->ssts[i].totkv;
+    totsz += msstx1->ssts[i].fsize;
   }
   debug_assert(totsz <= UINT32_MAX);
 
@@ -3228,7 +3241,7 @@ ssty_build_at(const int dirfd, struct msst * const x1,
   struct kv ** const anchors = malloc(sizeof(*anchors) * maxsecs);
   debug_assert(ranks && ptrs && anchors);
 
-  struct ssty_build_info bi = {.x1 = x1, .y0 = y0, .dirfd = dirfd, .way0 = way0,
+  struct ssty_build_info bi = {.x1 = msstx1, .y0 = mssty0, .dfd = dfd, .way0 = way0,
     .ranks = ranks, .ptrs = ptrs, .anchors = anchors};
 
   ssty_build_sort_msstb(&bi);
@@ -3338,14 +3351,14 @@ ssty_build_at(const int dirfd, struct msst * const x1,
 }
 
   u32
-ssty_build(const char * const dirname, struct msst * const x1,
-    const u64 seq, const u32 nway, struct msst * const y0, const u32 way0)
+ssty_build(const char * const dirname, struct msst * const msstx1,
+    const u64 seq, const u32 nway, struct msst * const mssty0, const u32 way0)
 {
-  const int dirfd = open(dirname, O_RDONLY|O_DIRECTORY);
-  if (dirfd < 0)
+  const int dfd = open(dirname, O_RDONLY|O_DIRECTORY);
+  if (dfd < 0)
     return 0;
-  const u32 ret = ssty_build_at(dirfd, x1, seq, nway, y0, way0);
-  close(dirfd);
+  const u32 ret = ssty_build_at(dfd, msstx1, seq, nway, mssty0, way0);
+  close(dfd);
   return ret;
 }
 // }}} main
@@ -3432,11 +3445,11 @@ msstv_append(struct msstv * const v, struct msst * const msst, const struct kv *
 
 // save to a file
   static bool
-msstv_save(struct msstv * const v, const int dirfd)
+msstv_save(struct msstv * const v, const int dfd)
 {
   char fn[24];
   sprintf(fn, "%lu.ver", v->version);
-  int fd = openat(dirfd, fn, O_CREAT|O_WRONLY|O_TRUNC, 00644);
+  int fd = openat(dfd, fn, O_CREAT|O_WRONLY|O_TRUNC, 00644);
   if (fd < 0)
     return false;
 
@@ -3460,9 +3473,9 @@ msstv_save(struct msstv * const v, const int dirfd)
 
 // open version and open all msstys
   static struct msstv *
-msstv_open_at(const int dirfd, const char * const filename)
+msstv_open_at(const int dfd, const char * const filename)
 {
-  const int fd = openat(dirfd, filename, O_RDONLY);
+  const int fd = openat(dfd, filename, O_RDONLY);
   if (fd < 0)
     return NULL;
 
@@ -3492,7 +3505,7 @@ msstv_open_at(const int dirfd, const char * const filename)
     struct kv * const anchor = (typeof(anchor))cursor;
     const u64 magic = anchor->priv;
     // rc: msstz_open sets rc later; compaction sets rc manually
-    struct msst * const mssty = mssty_open_at(dirfd, magic / 100, magic % 100);
+    struct msst * const mssty = mssty_open_at(dfd, magic / 100, magic % 100);
     if (!mssty) {
       msstv_destroy(v);
       free(buf);
@@ -3510,11 +3523,11 @@ msstv_open_at(const int dirfd, const char * const filename)
   struct msstv *
 msstv_open(const char * const dirname, const char * const filename)
 {
-  const int dirfd = open(dirname, O_RDONLY|O_DIRECTORY);
-  if (dirfd < 0)
+  const int dfd = open(dirname, O_RDONLY|O_DIRECTORY);
+  if (dfd < 0)
     return NULL;
-  struct msstv * const v = msstv_open_at(dirfd, filename);
-  close(dirfd);
+  struct msstv * const v = msstv_open_at(dfd, filename);
+  close(dfd);
   return v;
 }
 
@@ -3884,7 +3897,7 @@ struct msstz {
 
   double t0;
   int stat_log; // for printf
-  int dirfd; // could be stderr
+  int dfd;
   u64 stat_time; // time spent in comp()
   u64 stat_writes; // total bytes written to sstx&ssty
   u64 stat_reads; // total bytes read through rcache; user reads are included if running concurrently
@@ -3907,34 +3920,34 @@ msstz_log(struct msstz * const z, const char * const fmt, ...)
 }
 
   static void
-msstz_head_sync(const int dirfd, const u64 version)
+msstz_head_sync(const int dfd, const u64 version)
 {
   char basefn[24];
   sprintf(basefn, "./%lu.ver", version);
 
-  unlinkat(dirfd, "HEAD", 0);
-  symlinkat(basefn, dirfd, "HEAD");
+  unlinkat(dfd, "HEAD", 0);
+  symlinkat(basefn, dfd, "HEAD");
 
-  unlinkat(dirfd, "HEAD1", 0);
-  symlinkat(basefn, dirfd, "HEAD1");
+  unlinkat(dfd, "HEAD1", 0);
+  symlinkat(basefn, dfd, "HEAD1");
   return;
 }
 
 // create empty store
   static struct msstv *
-msstz_create_v0(const int dirfd)
+msstz_create_v0(const int dfd)
 {
   // msstx nway = 0
-  struct msst * const msst = msstx_open_at(dirfd, 0, 0);
+  struct msst * const msst = msstx_open_at(dfd, 0, 0);
   if (!msst)
     return NULL;
 
-  if (!ssty_build_at(dirfd, msst, 0, 0, NULL, 0)) {
+  if (!ssty_build_at(dfd, msst, 0, 0, NULL, 0)) {
     msstx_destroy(msst);
     return NULL;
   }
 
-  if (!mssty_open_y_at(dirfd, msst)) {
+  if (!mssty_open_y_at(dfd, msst)) {
     msstx_destroy(msst);
     return NULL;
   }
@@ -3953,22 +3966,22 @@ msstz_create_v0(const int dirfd)
 msstz_open(const char * const dirname, const u64 cache_size_mb, const bool ckeys)
 {
   // get the dir
-  int dirfd = open(dirname, O_RDONLY | O_DIRECTORY);
-  if (dirfd < 0) {
+  int dfd = open(dirname, O_RDONLY | O_DIRECTORY);
+  if (dfd < 0) {
     mkdir(dirname, 00777);
-    dirfd = open(dirname, O_RDONLY | O_DIRECTORY);
+    dfd = open(dirname, O_RDONLY | O_DIRECTORY);
   }
-  if (dirfd < 0)
+  if (dfd < 0)
     return NULL;
 
   // get a version
-  struct msstv * hv = msstv_open_at(dirfd, "HEAD");
+  struct msstv * hv = msstv_open_at(dfd, "HEAD");
   if (hv == NULL)
-    hv = msstv_open_at(dirfd, "HEAD1");
+    hv = msstv_open_at(dfd, "HEAD1");
   if (hv == NULL)
-    hv = msstz_create_v0(dirfd);
+    hv = msstz_create_v0(dfd);
   if (hv == NULL) {
-    close(dirfd);
+    close(dfd);
     return NULL;
   }
 
@@ -4000,18 +4013,18 @@ msstz_open(const char * const dirname, const u64 cache_size_mb, const bool ckeys
   z->nway_major = MSSTZ_NWAY_MAJOR; // fixed
   z->nway_minor = MSSTZ_NWAY_MINOR; // fixed
   z->ckeys = ckeys;
-  z->dirfd = dirfd;
+  z->dfd = dfd;
 
   char logfn[80];
   char buf[64];
   time_stamp2(buf, 64);
 
   sprintf(logfn, "log-%s", buf);
-  z->stat_log = openat(dirfd, logfn, O_CREAT|O_WRONLY|O_TRUNC, 00644);
+  z->stat_log = openat(dfd, logfn, O_CREAT|O_WRONLY|O_TRUNC, 00644);
   debug_assert(z->stat_log >= 0);
 
-  unlinkat(dirfd, "LOG", 0);
-  symlinkat(logfn, dirfd, "LOG");
+  unlinkat(dfd, "LOG", 0);
+  symlinkat(logfn, dfd, "LOG");
 
   z->t0 = time_sec();
 
@@ -4113,7 +4126,7 @@ msstz_gc(struct msstz * const z)
   qsort_u64(vall, nr);
   const u64 maxseq = vseq[nr-1];
   // search file in dir
-  DIR * const dir = opendir(z->dirname); // don't directly use the dirfd
+  DIR * const dir = opendir(z->dirname); // don't directly use the dfd
   if (!dir) {
     msstz_log(z, "%s opendir() failed\n", __func__);
     exit(0);
@@ -4131,7 +4144,7 @@ msstz_gc(struct msstz * const z)
 
     if (!memcmp(dot, ".ver", 4)) {
       if (a2u64(ent->d_name) < hv->version)
-        unlinkat(z->dirfd, ent->d_name, 0);
+        unlinkat(z->dfd, ent->d_name, 0);
       continue;
     }
 
@@ -4153,7 +4166,7 @@ msstz_gc(struct msstz * const z)
       debug_die();
     }
     // now delete
-    unlinkat(z->dirfd, ent->d_name, 0);
+    unlinkat(z->dfd, ent->d_name, 0);
     //msstz_log(z, "%s unlink %s\n", __func__, ent->d_name);
     nu++;
   } while (true);
@@ -4200,7 +4213,7 @@ msstz_destroy(struct msstz * const z)
 
   close(z->stat_log);
   free(z->dirname);
-  close(z->dirfd);
+  close(z->dfd);
   free(z);
 }
 // }}} msstz
@@ -4272,14 +4285,14 @@ msstz_yq_create(const u64 nslots)
 }
 
   static struct msstz_ytask *
-msstz_yq_append(struct msstz_yq * const yq, struct msst * const y1, const u64 seq1, const u32 way1,
-    struct msst * const y0, const u32 way0, const u64 ipart, const u64 isub, const struct kv * const anchor)
+msstz_yq_append(struct msstz_yq * const yq, struct msst * const mssty1, const u64 seq1, const u32 way1,
+    struct msst * const mssty0, const u32 way0, const u64 ipart, const u64 isub, const struct kv * const anchor)
 {
   spinlock_lock(&yq->lock);
   const u64 i = yq->pseq++;
   struct msstz_ytask * const task = &yq->tasks[i];
-  task->y1 = y1; // not NULL only when append
-  task->y0 = y0;
+  task->y1 = mssty1; // not NULL only when append
+  task->y0 = mssty0;
   task->seq1 = seq1;
   task->way1 = way1;
   task->way0 = way0;
@@ -4313,15 +4326,15 @@ msstz_yq_consume(struct msstz_comp_info * const ci)
 
   // open a msstx and call ssty_build
   //const u64 t0 = time_nsec();
-  struct msst * const msst = msstx_open_at_reuse(z->dirfd, task->seq1, task->way1, task->y0, task->way0);
+  struct msst * const msst = msstx_open_at_reuse(z->dfd, task->seq1, task->way1, task->y0, task->way0);
   msst_rcache(msst, z->rc);
-  const u32 ysz = ssty_build_at(z->dirfd, msst, task->seq1, task->way1, task->y0, task->way0);
+  const u32 ysz = ssty_build_at(z->dfd, msst, task->seq1, task->way1, task->y0, task->way0);
   if (!ysz)
     debug_die();
   ci->stat_writes += ysz;
 
   // convert msstx to mssty
-  const bool ry = mssty_open_y_at(z->dirfd, msst);
+  const bool ry = mssty_open_y_at(z->dfd, msst);
   if (!ry)
     debug_die();
   task->y1 = msst; // done; the new partition is now loaded and ready to use
@@ -4341,7 +4354,7 @@ msstz_yq_consume(struct msstz_comp_info * const ci)
   static void
 msstz_comp_ssts(struct msstz_comp_info * const ci, const u64 ipart, struct miter * const miter,
     const struct kv * const k0, const struct kv * const kz, const u64 seq0, const u32 way0, const bool split,
-    struct msst * const y0, const bool is_append)
+    struct msst * const mssty0, const bool is_append)
 {
   struct msstz * const z = ci->z;
   // tmp anchor
@@ -4352,7 +4365,7 @@ msstz_comp_ssts(struct msstz_comp_info * const ci, const u64 ipart, struct miter
   debug_assert(way < MSST_NWAY);
 
   if (is_append) {
-    msstz_yq_append(ci->yq, y0, seq, way, NULL, 0, ipart, 0, k0); // only y0, ipart, and k0 will be used
+    msstz_yq_append(ci->yq, mssty0, seq, way, NULL, 0, ipart, 0, k0); // only mssty0, ipart, and k0 will be used
     np++;
     seq = z->seq++;
     way = 0;
@@ -4360,7 +4373,7 @@ msstz_comp_ssts(struct msstz_comp_info * const ci, const u64 ipart, struct miter
   // a compaction may create new partitions, each with several new tables
   do {
     //const u64 t0 = time_nsec();
-    const u64 sizex = sst_build_at(z->dirfd, miter, seq, way, z->nblks, split, z->ckeys, NULL, kz);
+    const u64 sizex = sst_build_at(z->dfd, miter, seq, way, z->nblks, split, z->ckeys, NULL, kz);
     //const u64 dt = time_diff_nsec(t0);
     ci->stat_writes += sizex;
     //msstz_log(z, "%s dt-ms %lu sst-build %lu-%02u %lu\n", __func__, dt / 1000000, seq, way, sizex);
@@ -4375,7 +4388,7 @@ msstz_comp_ssts(struct msstz_comp_info * const ci, const u64 ipart, struct miter
     if (donez || done1) { // close current mssty
       // provide y0 and way0 only for the first partition
       if (np == 0) { // on the original partition; use y0, way0, and k0
-        msstz_yq_append(ci->yq, NULL, seq, way, y0, way0, ipart, np, k0);
+        msstz_yq_append(ci->yq, NULL, seq, way, mssty0, way0, ipart, np, k0);
       } else { // a new partition: reuse nothing, generate anchor
         msstz_yq_append(ci->yq, NULL, seq, way, NULL, 0, ipart, np, NULL);
       }
@@ -4398,7 +4411,7 @@ msstz_comp_ssts(struct msstz_comp_info * const ci, const u64 ipart, struct miter
 }
 
   static void
-msstz_comp_link(const int dirfd, const u64 seq0, const u64 seq1, const u32 nway)
+msstz_comp_link(const int dfd, const u64 seq0, const u64 seq1, const u32 nway)
 {
   debug_assert(seq0 < seq1);
   char fn0[24];
@@ -4407,8 +4420,8 @@ msstz_comp_link(const int dirfd, const u64 seq0, const u64 seq1, const u32 nway)
   for (u32 i = 0; i < nway; i++) {
     sprintf(fn0, "%03lu.sstx", seq0 * 100lu + i);
     sprintf(fn1, "%03lu.sstx", seq1 * 100lu + i);
-    unlinkat(dirfd, fn1, 0);
-    linkat(dirfd, fn0, dirfd, fn1, 0);
+    unlinkat(dfd, fn1, 0);
+    linkat(dfd, fn0, dfd, fn1, 0);
   }
 }
 // }}} x
@@ -4460,8 +4473,8 @@ msstz_comp_harvest(struct msstz_comp_info * const ci)
   v1->rc = z->rc;
   v1->next = v0;
   // finalize the new version v1
-  msstv_save(v1, z->dirfd);
-  msstz_head_sync(z->dirfd, v1->version);
+  msstv_save(v1, z->dfd);
+  msstz_head_sync(z->dfd, v1->version);
 
   // add the new version to z
   rwlock_lock_write(&(z->head_lock));
@@ -4666,18 +4679,18 @@ msstz_comp_x(struct msstz_comp_info * const ci, const u64 ipart)
   const u64 t0 = time_nsec();
   struct msstz * const z = ci->z;
   struct msstv_part * const part = &(ci->v0->es[ipart]);
-  struct msst * const y0 = part->msst;
+  struct msst * const mssty0 = part->msst;
   struct msstz_comp_part * const cpart = &(ci->parts[ipart]);
   const struct kv * const k0 = part->anchor;
   debug_assert(k0);
 
   const u64 magic0 = part->anchor->priv;
   const u64 seq0 = magic0 / 100lu; // seq of the old partition
-  const u32 nway0 = y0->nway; // seq of the old partition
+  const u32 nway0 = mssty0->nway; // seq of the old partition
 
   if (cpart->bestway == MSSTZ_NWAY_MINOR) { // marked as rejected by msstz_comp()
     // reject: send to yqueue as completed; use seq = UINT64_MAX for real rejections or seq0 for newsz == 0
-    msstz_yq_append(ci->yq, y0, cpart->newsz ? UINT64_MAX : seq0, nway0, NULL, 0, ipart, 0, k0); // {y0, seq, ipart, k0} will be used later
+    msstz_yq_append(ci->yq, mssty0, cpart->newsz ? UINT64_MAX : seq0, nway0, NULL, 0, ipart, 0, k0); // {y0, seq, ipart, k0} will be used later
     ci->nx++;
     return 0;
   }
@@ -4700,14 +4713,14 @@ msstz_comp_x(struct msstz_comp_info * const ci, const u64 ipart)
   if (bestway < nway0) { // major or partial
     debug_assert(seq1 != seq0);
     // hard link unchanged files for major and partial
-    msstz_comp_link(z->dirfd, seq0, seq1, bestway);
+    msstz_comp_link(z->dfd, seq0, seq1, bestway);
 
     if (bestway) { // partial
       for (u32 w = bestway; w < nway0; w++)
-        miter_add(miter, &kvmap_api_sst, &(y0->ssts[w]));
+        miter_add(miter, &kvmap_api_sst, &(mssty0->ssts[w]));
       ci->stat_partial++;
     } else { // major
-      miter_add(miter, &kvmap_api_mssty, y0);
+      miter_add(miter, &kvmap_api_mssty, mssty0);
       ci->stat_major++;
     }
   } else if (bestway == nway0) { // minor: add nothing
@@ -4728,7 +4741,7 @@ msstz_comp_x(struct msstz_comp_info * const ci, const u64 ipart)
   const u32 compway = is_append ? nway0 : bestway;
   // allow split (and gc tombstones) when: major or append
   const bool split = is_major || is_append;
-  msstz_comp_ssts(ci, ipart, miter, k0, kz, seq1, compway, split, y0, is_append);
+  msstz_comp_ssts(ci, ipart, miter, k0, kz, seq1, compway, split, mssty0, is_append);
   miter_destroy(miter);
   ci->nx++; // done with one partition's x
   return time_diff_nsec(t0);

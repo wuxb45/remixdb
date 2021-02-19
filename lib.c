@@ -2351,7 +2351,7 @@ oalloc_create(const size_t blksz)
 oalloc_alloc(struct oalloc * const o, const size_t size)
 {
   if ((o->curr + size) <= o->blksz) {
-    void * ret = o->mem + o->curr;
+    void * ret = ((u8 *)o->mem) + o->curr;
     o->curr += size;
     return ret;
   }
@@ -4520,7 +4520,7 @@ qsbr_wait(struct qsbr * const q, const u64 target)
       struct qshard * const shard = &(q->shards[i]);
       const u64 bits1 = atomic_load_explicit(&(shard->bitmap), MO_CONSUME);
       for (u64 bits = bms[i]; bits; bits &= (bits - 1)) {
-        const u64 bit = bits & -bits;
+        const u64 bit = bits & -bits; // extract lowest bit
         if (((bits1 & bit) == 0) ||
             (atomic_load_explicit(&(shard->ptrs[__builtin_ctzl(bit)]->qstate), MO_CONSUME) == target))
           bms[i] &= ~bit;

@@ -7,16 +7,11 @@
 
 // include {{{
 #include "lib.h"
-#include "blkio.h"
 #include "ctypes.h"
 #include <sys/ioctl.h>
 #include <assert.h>
 #include <aio.h>
-
-#if defined(LIBURING)
-#define BLKIO_URING
-#include <liburing.h>
-#endif // URING
+#include "blkio.h"
 
 // }}} include
 
@@ -28,7 +23,7 @@ struct wring {
   size_t iosz;
   size_t memsz;
   int fd;
-#if defined(BLKIO_URING)
+#if defined(LIBURING)
   u32 batch; // submit when pending >= batch
   u32 nring; // number of pending + submitted
   u32 pending; // number of unsubmitted sqes
@@ -44,20 +39,20 @@ struct wring {
     struct aiocb aiocb;
     void * data;
   } aring[0];
-#endif // BLKIO_URING
+#endif // LIBURING
 };
 
   struct wring *
 wring_create(const int fd, const size_t iosz, const u32 depth0)
 {
   debug_assert(depth0);
-#if defined(BLKIO_URING)
+#if defined(LIBURING)
   const u32 depth = depth0 < 64 ? bits_p2_up_u32(depth0) : 64;
   struct wring * const wring = calloc(1, sizeof(*wring));
 #else // POSIX AIO
   const u32 depth = depth0 < 8 ? bits_p2_up_u32(depth0) : 8;
   struct wring * const wring = calloc(1, sizeof(*wring) + (sizeof(wring->aring[0]) * depth));
-#endif // BLKIO_URING
+#endif // LIBURING
 
   if (!wring)
     return NULL;
@@ -75,7 +70,7 @@ wring_create(const int fd, const size_t iosz, const u32 depth0)
   wring->head = mem;
   wring->iosz = iosz;
   wring->fd = fd;
-#if defined(BLKIO_URING)
+#if defined(LIBURING)
   wring->batch = depth >> 2; // 1/4
   struct io_uring_params p = {};
   // uncomment to use sqpoll (must use root or sys_admin)
@@ -96,7 +91,7 @@ wring_create(const int fd, const size_t iosz, const u32 depth0)
 
 #else
   wring->off_mask = depth - 1;
-#endif // BLKIO_URING
+#endif // LIBURING
   return wring;
 }
 
@@ -104,13 +99,13 @@ wring_create(const int fd, const size_t iosz, const u32 depth0)
 wring_update_fd(struct wring * const wring, const int fd)
 {
   wring->fd = fd;
-#if defined(BLKIO_URING)
+#if defined(LIBURING)
   if (wring->fixed_file) {
     const int r = io_uring_register_files_update(&wring->uring, 0, &wring->fd, 1);
     if (r != 1)
       wring->fixed_file = false;
   }
-#endif // BLKIO_URING
+#endif // LIBURING
 }
 
   void
@@ -118,9 +113,9 @@ wring_destroy(struct wring * const wring)
 {
   wring_flush(wring);
 
-#if defined(BLKIO_URING)
+#if defined(LIBURING)
   io_uring_queue_exit(&wring->uring);
-#endif // BLKIO_URING
+#endif // LIBURING
 
   pages_unmap(wring->mem, wring->memsz);
   free(wring);
@@ -129,7 +124,7 @@ wring_destroy(struct wring * const wring)
   static void *
 wring_wait(struct wring * const wring)
 {
-#if defined(BLKIO_URING)
+#if defined(LIBURING)
   debug_assert(wring->nring);
   struct io_uring_cqe * cqe = NULL;
   // wait and directly return buffer
@@ -159,7 +154,7 @@ wring_wait(struct wring * const wring)
     debug_die();
   void * const ptr = wring->aring[i].data;
   wring->off_finish++;
-#endif // BLKIO_URING
+#endif // LIBURING
   return ptr;
 }
 
@@ -195,7 +190,7 @@ wring_finish(struct wring * const wring)
   }
 }
 
-#if defined(BLKIO_URING)
+#if defined(LIBURING)
   static void
 wring_submit(struct wring * const wring)
 {
@@ -213,7 +208,7 @@ wring_wait_slot(struct wring * const wring)
   if ((wring->off_finish + wring->off_mask) == wring->off_submit)
     wring_finish(wring);
 }
-#endif // BLKIO_URING
+#endif // LIBURING
 
 // write a 4kB page
   void
@@ -221,16 +216,16 @@ wring_write_partial(struct wring * const wring, const size_t off,
     void * const buf, const size_t buf_off, const size_t size)
 {
   debug_assert((buf_off + size) <= wring->iosz);
-  //debug_assert(wring->nring < wring->depth);
-#if defined(BLKIO_URING)
+  u8 * const wbuf = ((u8 *)buf) + buf_off;
+#if defined(LIBURING)
   struct io_uring_sqe * const sqe = io_uring_get_sqe(&wring->uring);
   debug_assert(sqe);
 
   const int fd = wring->fixed_file ? 0 : wring->fd;
   if (wring->fixed_mem) {
-    io_uring_prep_write_fixed(sqe, fd, buf + buf_off, size, off, 0);
+    io_uring_prep_write_fixed(sqe, fd, wbuf, size, off, 0);
   } else {
-    io_uring_prep_write(sqe, fd, buf + buf_off, size, off);
+    io_uring_prep_write(sqe, fd, wbuf, size, off);
   }
 
   if (wring->fixed_file)
@@ -247,7 +242,7 @@ wring_write_partial(struct wring * const wring, const size_t off,
   const u32 i = wring->off_submit & wring->off_mask;
   struct aiocb * const cb = &wring->aring[i].aiocb;
   cb->aio_fildes = wring->fd;
-  cb->aio_buf = buf + buf_off;
+  cb->aio_buf = wbuf;
   cb->aio_nbytes = size;
   cb->aio_offset = off;
   wring->aring[i].data = buf;
@@ -256,7 +251,7 @@ wring_write_partial(struct wring * const wring, const size_t off,
     debug_die_perror();
 
   wring->off_submit++;
-#endif // BLKIO_URING
+#endif // LIBURING
 }
 
   inline void
@@ -268,20 +263,20 @@ wring_write(struct wring * const wring, const size_t off, void * const buf)
   static bool
 wring_empty(struct wring * const wring)
 {
-#if defined(BLKIO_URING)
+#if defined(LIBURING)
   return wring->nring == 0;
 #else
   return wring->off_submit == wring->off_finish;
-#endif // BLKIO_URING
+#endif // LIBURING
 }
 
   void
 wring_flush(struct wring * const wring)
 {
-#if defined(BLKIO_URING)
+#if defined(LIBURING)
   while (wring->pending)
     wring_submit(wring);
-#endif // BLKIO_URING
+#endif // LIBURING
   while (!wring_empty(wring))
     wring_finish(wring);
 }
@@ -289,7 +284,7 @@ wring_flush(struct wring * const wring)
   void
 wring_fsync(struct wring * const wring)
 {
-#if defined(BLKIO_URING)
+#if defined(LIBURING)
   struct io_uring_sqe * const sqe = io_uring_get_sqe(&wring->uring);
   io_uring_prep_fsync(sqe, wring->fd, IORING_FSYNC_DATASYNC);
   //io_uring_sqe_set_data(sqe, NULL); // NULL by prep
@@ -314,7 +309,7 @@ wring_fsync(struct wring * const wring)
     debug_die_perror();
 
   wring->off_submit++;
-#endif // BLKIO_URING
+#endif // LIBURING
 }
 // }}} wring
 
@@ -344,9 +339,9 @@ struct coq {
 
   struct co * rq[COQ_NR];
   struct cowqe wq[COQ_NR];
-#if defined(BLKIO_URING)
+#if defined(LIBURING)
   struct io_uring uring[0]; // optional uring at the end
-#endif // BLKIO_URING
+#endif // LIBURING
 };
 // }}} struct
 
@@ -627,7 +622,7 @@ coq_pwrite_aio(struct coq * const q, const int fd, const void * const buf, const
 // }}} aio
 
 // io_uring {{{
-#if defined(BLKIO_URING)
+#if defined(LIBURING)
   static inline bool
 coq_uring_init(struct io_uring * const ring, const u32 depth)
 {
@@ -749,7 +744,7 @@ coq_pwrite_uring(struct coq * const q, struct io_uring * const ring0,
   io_uring_cqe_seen(ring, cqe);
   return ret;
 }
-#endif // BLKIO_URING
+#endif // LIBURING
 // }}} io_uring
 
 // }}} coq
@@ -837,22 +832,22 @@ rcache_destroy(struct rcache * const c)
   struct coq *
 rcache_coq_create(const u32 depth)
 {
-#if defined(BLKIO_URING)
+#if defined(LIBURING)
   return coq_uring_create_pair(depth);
 #else
   (void)depth;
   return coq_create();
-#endif // BLKIO_URING
+#endif // LIBURING
 }
 
   void
 rcache_coq_destroy(struct coq * const coq)
 {
-#if defined(BLKIO_URING)
+#if defined(LIBURING)
   coq_uring_destroy_pair(coq);
 #else
   coq_destroy(coq);
-#endif // BLKIO_URING
+#endif // LIBURING
 }
 
   static inline void
@@ -860,13 +855,13 @@ rcache_read(int fd, void *pg, u32 pno)
 {
   struct coq * const coq = coq_current();
   if (coq) {
-#if defined(BLKIO_URING)
+#if defined(LIBURING)
     if (coq_pread_uring(coq, NULL, fd, pg, PGSZ, PGSZ * pno) != PGSZ)
       debug_die();
 #else
     if (coq_pread_aio(coq, fd, pg, PGSZ, PGSZ * pno) != PGSZ)
       debug_die();
-#endif // BLKIO_URING
+#endif // LIBURING
   } else { // regular pread
     if (pread(fd, pg, PGSZ, PGSZ * pno) != PGSZ)
       debug_die();

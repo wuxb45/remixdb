@@ -4,6 +4,7 @@
  * All rights reserved. No warranty, explicit or implicit, provided.
  */
 #pragma once
+
 #ifdef __cplusplus
 extern "C" {
 #endif

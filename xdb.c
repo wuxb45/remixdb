@@ -713,10 +713,6 @@ xdb_recover(struct xdb * const xdb)
 
   // will recover fds[1] fist, then fds[0] if necessary, then keep using fds[0] since it's probably still half-full
   if (vs[0] < vs[1]) { // swap
-    const u64 tmp = vs[0];
-    vs[0] = vs[1];
-    vs[1] = tmp;
-
     const int fd1 = wal->fds[0];
     wal->fds[0]= wal->fds[1];
     wal->fds[1] = fd1;

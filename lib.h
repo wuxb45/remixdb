@@ -4,9 +4,6 @@
  * All rights reserved. No warranty, explicit or implicit, provided.
  */
 #pragma once
-#ifdef __cplusplus
-extern "C" {
-#endif
 
 // includes {{{
 // C headers
@@ -31,6 +28,10 @@ extern "C" {
 #include <sys/stat.h>
 #include <sys/types.h>
 // }}} includes
+
+#ifdef __cplusplus
+extern "C" {
+#endif
 
 // types {{{
 typedef char            s8;

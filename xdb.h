@@ -4,12 +4,13 @@
  * All rights reserved. No warranty, explicit or implicit, provided.
  */
 #pragma once
-#ifdef __cplusplus
-extern "C" {
-#endif
 
 #include "lib.h"
 #include "kv.h"
+
+#ifdef __cplusplus
+extern "C" {
+#endif
 
 struct xdb;
 struct xdb_ref;

@@ -5,7 +5,7 @@
  */
 #pragma once
 
-// C types only
+// C types only; C++ source code don't use this
 
 #include <assert.h>
 #include <stdatomic.h>
@@ -52,4 +52,6 @@ typedef __m256i m256;
 #endif // __AVX2__
 #elif defined(__aarch64__)
 typedef uint8x16_t m128;
+#else
+#error Need x86_64 or AArch64.
 #endif

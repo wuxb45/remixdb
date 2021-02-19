@@ -603,12 +603,12 @@ wormhole_hmap_match_mask(const struct wormslot * const s, const m128 skey)
   const m128 sv = _mm_load_si128((const void *)s);
   return (u32)_mm_movemask_epi8(_mm_cmpeq_epi16(skey, sv));
 #elif defined(__aarch64__)
-  const uint16x8_t sv = vld1q_u16((const u16 *)s);
-  const uint16x8_t cmp = vceqq_u16(vreinterpretq_u16_u8(skey), sv); // cmpeq
-  const uint32x4_t sr2 = vreinterpretq_u32_u16(vshrq_n_u16(cmp, 14)); // 2-bit x 8
-  const uint64x2_t sr4 = vreinterpretq_u64_u32(vsraq_n_u32(sr2, sr2, 14)); // 4-bit x 4
-  const uint16x8_t sr8 = vreinterpretq_u16_u64(vsraq_n_u64(sr4, sr4, 28)); // 8-bit x 2
-  const u32 r = vgetq_lane_u16(sr8, 0) | (vgetq_lane_u16(sr8, 4) << 8);
+  const uint16x8_t sv = vld1q_u16((const u16 *)s); // load 16 bytes at s
+  const uint16x8_t cmp = vceqq_u16(vreinterpretq_u16_u8(skey), sv); // cmpeq => 0xffff or 0x0000
+  const uint32x4_t sr2 = vreinterpretq_u32_u16(vshrq_n_u16(cmp, 14)); // 2-bit x8 => 0x3 or 0x0
+  const uint64x2_t sr4 = vreinterpretq_u64_u32(vsraq_n_u32(sr2, sr2, 14)); // 4-bit x4 => 0xc|0x3 = 0xf
+  const uint16x8_t sr8 = vreinterpretq_u16_u64(vsraq_n_u64(sr4, sr4, 28)); // 8-bit x2 => 0xf0|0xf = 0xff
+  const u32 r = vgetq_lane_u16(sr8, 0) | (vgetq_lane_u16(sr8, 4) << 8); // 0xff|0xff00 = 0xffff
   return r;
 #endif
 }

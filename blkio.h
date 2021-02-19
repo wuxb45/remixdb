@@ -4,11 +4,15 @@
  * All rights reserved. No warranty, explicit or implicit, provided.
  */
 #pragma once
+
+#include "lib.h"
+#if defined(LIBURING)
+#include <liburing.h>
+#endif // LIBURING
+
 #ifdef __cplusplus
 extern "C" {
 #endif
-
-#include "lib.h"
 
 // wring {{{
 struct wring;
@@ -61,6 +65,9 @@ corq_enqueue(struct coq * const q, struct co * const co);
 cowq_enqueue(struct coq * const q, cowq_func exec, void * const priv);
 
   extern void
+cowq_remove(struct coq * const q, const u32 i);
+
+  extern void
 coq_yield(struct coq * const q);
 
   extern void
@@ -69,13 +76,22 @@ coq_idle(struct coq * const q);
   extern void
 coq_run(struct coq * const q);
 
+  extern void
+coq_install(struct coq * const q);
+
+  extern void
+coq_uninstall(void);
+
+  extern struct coq *
+coq_current(void);
+
   extern ssize_t
 coq_pread_aio(struct coq * const q, const int fd, void * const buf, const size_t count, const off_t offset);
 
   extern ssize_t
 coq_pwrite_aio(struct coq * const q, const int fd, const void * const buf, const size_t count, const off_t offset);
 
-#if defined(__linux__)
+#if defined(LIBURING)
 // io_uring-specific
   extern struct io_uring *
 coq_uring_create(const u32 depth);
@@ -97,16 +113,7 @@ coq_pread_uring(struct coq * const q, struct io_uring * const ring,
   extern ssize_t
 coq_pwrite_uring(struct coq * const q, struct io_uring * const ring,
     const int fd, const void * const buf, const size_t count, const off_t offset);
-#endif // __linux__
-
-  extern void
-coq_install(struct coq * const q);
-
-  extern void
-coq_uninstall(void);
-
-  extern struct coq *
-coq_current(void);
+#endif // LIBURING
 // }}} coq
 
 // rcache {{{

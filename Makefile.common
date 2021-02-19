@@ -67,15 +67,18 @@ endif
 
 UNAME_S := $(shell uname -s)
 ifeq ($(UNAME_S),Linux)
+  CHECK_S := -D__linux__
   LIB += rt
 else ifeq ($(UNAME_S),FreeBSD)
+  CHECK_S := -D__FreeBSD__
   LIB += rt
   LIB += execinfo
   TPUT := /usr/local/bin/tput
 else ifeq ($(UNAME_S),Darwin)
+  CHECK_S := -D__APPLE__ -D__MACH__
   # do nothing
 else
-  # TODO
+  $(error "Supported Platforms: Linux, FreeBSD, Darwin")
 endif
 TPUT ?= tput
 
@@ -84,11 +87,15 @@ CSTD = -std=gnu18
 XCC ?= clang++
 XSTD = -std=gnu++17
 
-ISA := $(shell uname -m)
-ifeq ($(ISA),aarch64) # "native" does not work for clang@aarch64
-ARCH ?= armv8-a+crc
+UNAME_M := $(shell uname -m)
+ifeq ($(UNAME_M),aarch64) # "native" does not work for clang@aarch64
+  CHECK_M := -D__aarch64__
+  ARCH ?= armv8-a+crc
+else ifeq ($(UNAME_M),x86_64)
+  CHECK_M := -D__x86_64__
+  ARCH ?= native
 else
-ARCH ?= native
+  $(error "Supported Platforms: aarch64, x86_64")
 endif
 
 TUNE ?= native
@@ -185,7 +192,7 @@ cleanx : clean
 
 check :
 	cppcheck $(addprefix -I ,$(CCINC)) \
-    -q -D__x86_64__=1 -DNDEBUG -U__cplusplus \
+    -q $(CHECK_M) $(CHECK_S) -DNDEBUG -U__cplusplus \
     --std=c11 --language=c --platform=unix64 \
     --enable=warning,style,performance,portability,information --inline-suppr .
 
