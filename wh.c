@@ -2929,12 +2929,6 @@ whunsafe_iter_seek(struct wormhole_iter * const iter, const struct kref * const 
   whunsafe_iter_fix(iter);
 }
 
-  bool
-whunsafe_iter_valid(struct wormhole_iter * const iter)
-{
-  return wormhole_iter_valid(iter);
-}
-
   void
 whunsafe_iter_skip(struct wormhole_iter * const iter, const u32 nr)
 {
@@ -2953,12 +2947,6 @@ whunsafe_iter_next(struct wormhole_iter * const iter, struct kv * const out)
   if (ret)
     whunsafe_iter_skip(iter, 1);
   return ret;
-}
-
-  bool
-whunsafe_iter_inp(struct wormhole_iter * const iter, kv_inp_func uf, void * const priv)
-{
-  return wormhole_iter_inp(iter, uf, priv);
 }
 
   void
@@ -3205,13 +3193,13 @@ const struct kvmap_api kvmap_api_whunsafe = {
   .delr = (void *)whunsafe_delr,
   .iter_create = (void *)whunsafe_iter_create,
   .iter_seek = (void *)whunsafe_iter_seek,
-  .iter_valid = (void *)whunsafe_iter_valid,
+  .iter_valid = (void *)wormhole_iter_valid,
   .iter_peek = (void *)wormhole_iter_peek,
   .iter_kref = (void *)wormhole_iter_kref,
   .iter_kvref = (void *)wormhole_iter_kvref,
   .iter_skip = (void *)whunsafe_iter_skip,
   .iter_next = (void *)whunsafe_iter_next,
-  .iter_inp = (void *)whunsafe_iter_inp,
+  .iter_inp = (void *)wormhole_iter_inp,
   .iter_destroy = (void *)whunsafe_iter_destroy,
   .clean = (void *)wormhole_clean,
   .destroy = (void *)wormhole_destroy,

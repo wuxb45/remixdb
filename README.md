@@ -63,6 +63,25 @@ To compile and run the demo code:
     $ make xdbdemo.out
     $ ./xdbdemo.out
 
+## Configuration
+
+RemixDB employs background threads to perform asynchronous compaction.
+When possible (on Linux or FreeBSD), these threads are pinned on specific cores for efficiency.
+To avoid having conflicts with the foreground threads, it is necessary to separate the cores used by different threads.
+By default, RemixDB pins 4 compaction threads on the last four cores of the current process's affinity list.
+For example, on a machine with two 10-core processors, cores 0,2,4,...,16,18 belong to numa node 0,
+and the rest cores belong to numa node 1.
+The default behavior is to use the cores from 16 to 19, which is a suboptimal setup.
+To avoid the performance penalty, one should set environment variable `XDB\_CPU\_LIST=core1,core2,...`
+to specify the cores used by the background threads.
+The number of cores can be from 1 to 8
+For the machine mentioned above, a preferred setup would be like this:
+
+```
+$ export XDB_CPU_LIST=12,14,16,18
+$ ./xdbdemo.out
+```
+
 ## xdbtest
 
 `xdbtest` is a stress test program that uses the `remixdb_*` functions.

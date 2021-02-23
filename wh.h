@@ -195,11 +195,9 @@ whunsafe_iter_create(struct wormhole * const map);
   extern void
 whunsafe_iter_seek(struct wormhole_iter * const iter, const struct kref * const key);
 
-  extern bool
-whunsafe_iter_valid(struct wormhole_iter * const iter);
-
-// unsafe peek: use wormhole_iter_peek
-// unsafe kref: use wormhole_iter_kref
+// unsafe iter_valid: use wormhole_iter_valid
+// unsafe iter_peek: use wormhole_iter_peek
+// unsafe iter_kref: use wormhole_iter_kref
 
   extern void
 whunsafe_iter_skip(struct wormhole_iter * const iter, const u32 nr);
@@ -207,8 +205,7 @@ whunsafe_iter_skip(struct wormhole_iter * const iter, const u32 nr);
   extern struct kv *
 whunsafe_iter_next(struct wormhole_iter * const iter, struct kv * const out);
 
-  extern bool
-whunsafe_iter_inp(struct wormhole_iter * const iter, kv_inp_func uf, void * const priv);
+// unsafe iter_inp: use wormhole_iter_inp
 
   extern void
 whunsafe_iter_destroy(struct wormhole_iter * const iter);

@@ -594,6 +594,14 @@ kref_ref_kv(struct kref * const kref, const struct kv * const kv)
   kref->hash32 = kv->hashlo;
 }
 
+  inline void
+kref_ref_kv_hash32(struct kref * const kref, const struct kv * const kv)
+{
+  kref->ptr = kv->kv;
+  kref->len = kv->klen;
+  kref->hash32 = kv_crc32c(kv->kv, kv->klen);
+}
+
   inline bool
 kref_match(const struct kref * const k1, const struct kref * const k2)
 {
@@ -995,6 +1003,27 @@ kvmap_raw_iter_seek(const struct kvmap_api * const api, void * const iter,
   api->iter_seek(iter, &kref);
 }
 // }}}} kvmap_raw_op
+
+// dump {{{
+  u64
+kvmap_dump_keys(const struct kvmap_api * const api, void * const map, const int fd)
+{
+  void * const ref = kvmap_ref(api, map);
+  void * const iter = api->iter_create(ref);
+  api->iter_seek(iter, kref_null());
+  u64 i = 0;
+  while (api->iter_valid(iter)) {
+    struct kref kref;
+    api->iter_kref(iter, &kref);
+    dprintf(fd, "%010lu [%3u] %.*s\n", i, kref.len, kref.len, kref.ptr);
+    i++;
+    api->iter_skip(iter, 1);
+  }
+  api->iter_destroy(iter);
+  kvmap_unref(api, ref);
+  return i;
+}
+// }}} dump
 
 // }}} kvmap
 

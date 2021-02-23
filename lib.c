@@ -3438,12 +3438,19 @@ rgen_new_expo(const double percentile, const double range)
 rgen_new_linear(const u64 min, const u64 max, const s64 inc,
     const u8 type, rgen_next_func func)
 {
-  debug_assert(max > min);
+  if (min > max || inc == INT64_MIN)
+    return NULL;
+  const u64 mod = max - min + 1; // mod == 0 with min=0,max=UINT64_MAX
+  const u64 incu = (u64)((inc >= 0) ? inc : -inc);
+  // incu cannot be too large
+  if (mod && (incu >= mod))
+    return NULL;
+
   struct rgen * const gi = calloc(1, sizeof(*gi));
   gi->unit_u64 = max > UINT32_MAX;
   gi->linear.uc = 0;
   gi->linear.base = inc >= 0 ? min : max;
-  gi->linear.mod = max - min + 1;
+  gi->linear.mod = mod;
   gi->linear.inc = inc;
   gi->type = type;
   gi->min = min;
@@ -3457,7 +3464,7 @@ gen_linear_incs_helper(struct rgen * const gi)
 {
   u64 v = atomic_fetch_add_explicit(&(gi->linear.ac), 1, MO_RELAXED);
   const u64 mod = gi->linear.mod;
-  if (v >= mod) {
+  if (mod && (v >= mod)) {
     do {
       v -= mod;
     } while (v >= mod);
@@ -3472,7 +3479,7 @@ gen_linear_incu_helper(struct rgen * const gi)
 {
   u64 v = gi->linear.uc++;
   const u64 mod = gi->linear.mod;
-  if (v == mod) {
+  if (mod && (v == mod)) {
     gi->linear.uc -= mod;
     v = 0;
   }
@@ -3505,18 +3512,21 @@ rgen_new_incu(const u64 min, const u64 max)
   return rgen_new_linear(min, max, 1, GEN_INCU, gen_incu);
 }
 
+// skips will produce wrong results when mod is not a power of two and ac overflows
   static u64
 gen_skips_up(struct rgen * const gi)
 {
-  const u64 v = atomic_fetch_add(&(gi->linear.ac), gi->linear.inc_u64);
-  return gi->linear.base + (v % gi->linear.mod);
+  const u64 v = atomic_fetch_add_explicit(&(gi->linear.ac), gi->linear.inc_u64, MO_RELAXED);
+  const u64 mod = gi->linear.mod;
+  return gi->linear.base + (mod ? (v % mod) : v);
 }
 
   static u64
 gen_skips_down(struct rgen * const gi)
 {
-  const u64 v = atomic_fetch_sub(&(gi->linear.ac), gi->linear.inc_u64);
-  return gi->linear.base - (v % gi->linear.mod);
+  const u64 v = atomic_fetch_sub_explicit(&(gi->linear.ac), gi->linear.inc_u64, MO_RELAXED);
+  const u64 mod = gi->linear.mod;
+  return gi->linear.base - (mod ? (v % mod) : v);
 }
 
   struct rgen *
@@ -3530,16 +3540,22 @@ rgen_new_skips(const u64 min, const u64 max, const s64 inc)
   static u64
 gen_skipu_up(struct rgen * const gi)
 {
-  const u64 v = gi->linear.uc % gi->linear.mod;
-  gi->linear.uc += gi->linear.inc_u64;
+  const u64 v = gi->linear.uc;
+  const u64 mod = gi->linear.mod;
+  debug_assert((mod == 0) | (v < mod));
+  const u64 v1 = v + gi->linear.inc_u64;
+  gi->linear.uc = (v1 >= mod) ? (v1 - mod) : v1;
   return gi->linear.base + v;
 }
 
   static u64
 gen_skipu_down(struct rgen * const gi)
 {
-  const u64 v = gi->linear.uc % gi->linear.mod;
-  gi->linear.uc -= gi->linear.inc_u64;
+  const u64 v = gi->linear.uc;
+  const u64 mod = gi->linear.mod;
+  debug_assert((mod == 0) | (v < mod));
+  const u64 v1 = v - gi->linear.inc_u64; // actually +
+  gi->linear.uc = (v1 >= mod) ? (v1 - mod) : v1;
   return gi->linear.base - v;
 }
 
@@ -3634,7 +3650,7 @@ struct zeta_range_info {
 zeta_range_worker(void * const ptr)
 {
   struct zeta_range_info * const zi = (typeof(zi))ptr;
-  const u64 seq = atomic_fetch_add(&(zi->seq), 1);
+  const u64 seq = atomic_fetch_add_explicit(&(zi->seq), 1, MO_RELAXED);
   const u64 start = zi->start;
   const double theta = zi->theta;
   const u64 count = zi->count;

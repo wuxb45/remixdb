@@ -4638,13 +4638,13 @@ msstz_comp_analyze(struct msstz_comp_info * const ci, const u64 ipart)
   cpart->bestway = bestway; // bestway is determined
 
   // log some details of the compaction
-  for (u32 i = 0; i <= nway; i++) {
-    const u64 sz = (i < nway) ? (msst->ssts[i].nblks * PGSZ) : newsz;
-    const float pct = ((float)sz) * 100.0f / (float)MSSTZ_TSZ;
-    msstz_log(ci->z, "%c[%c%x] sz %9lu %6.2f%% wx %6lu wy %6lu nway1 %4.1f wa %4.1f bonus %4.1f score %5.2f\n",
-        (i == bestway ? '>':' '), (i == nway ? '*' : ' '), i,
-        sz, pct, f[i].wx, f[i].wy, f[i].nway1, f[i].wa, f[i].bonus, f[i].score);
-  }
+  //for (u32 i = 0; i <= nway; i++) {
+  //  const u64 sz = (i < nway) ? (msst->ssts[i].nblks * PGSZ) : newsz;
+  //  const float pct = ((float)sz) * 100.0f / (float)MSSTZ_TSZ;
+  //  msstz_log(ci->z, "%c[%c%x] sz %9lu %6.2f%% wx %6lu wy %6lu nway1 %4.1f wa %4.1f bonus %4.1f score %5.2f\n",
+  //      (i == bestway ? '>':' '), (i == nway ? '*' : ' '), i,
+  //      sz, pct, f[i].wx, f[i].wy, f[i].nway1, f[i].wa, f[i].bonus, f[i].score);
+  //}
   const u64 dt = time_diff_nsec(t0);
   msstz_log(ci->z, "%s dt-ms %lu magic0 %lu totkv0 %u valid0 %u newnr %u newsz %lu minor %.1f major %.1f bestway %u ratio %.3f\n",
       __func__, dt / 1000000, meta->magic, meta->totkv, meta->valid,

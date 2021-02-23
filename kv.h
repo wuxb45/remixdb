@@ -20,6 +20,8 @@ kv_crc32c_extend(const u32 crc32c);
 // }}}
 
 // kv {{{
+
+// struct {{{
 /*
  * Some internal union names can be ignored:
  * struct kv {
@@ -66,8 +68,9 @@ struct kvref {
   const u8 * vptr; // read-only
   struct kv hdr; // hdr.kv[] is invalid
 };
+// }}} struct
 
-
+// kv {{{
 typedef int  (*kv_kv_cmp_func)(const struct kv *, const struct kv *);
 
   extern size_t
@@ -196,7 +199,9 @@ kv_kptr_c(const struct kv * const kv);
 
   extern void
 kv_print(const struct kv * const kv, const char * const cmd, FILE * const out);
+// }}} kv
 
+// mm {{{
 typedef struct kv * (* kvmap_mm_in_func)(struct kv * kv, void * priv);
 typedef struct kv * (* kvmap_mm_out_func)(struct kv * kv, struct kv * out);
 typedef void        (* kvmap_mm_free_func)(struct kv * kv, void * priv);
@@ -236,6 +241,7 @@ kvmap_mm_free_free(struct kv * const kv, void * const priv);
 // the default mm
 extern const struct kvmap_mm kvmap_mm_dup; // in:Dup, out:Dup, free:Free
 extern const struct kvmap_mm kvmap_mm_ndf; // in:Noop, out:Dup, free:Free
+// }}} mm
 
 // ref {{{
 typedef int (*kref_kv_cmp_func)(const struct kref *, const struct kv *);
@@ -253,6 +259,9 @@ kref_update_hash32(struct kref * const kref);
 
   extern void
 kref_ref_kv(struct kref * const kref, const struct kv * const kv);
+
+  extern void
+kref_ref_kv_hash32(struct kref * const kref, const struct kv * const kv);
 
   extern bool
 kref_match(const struct kref * const k1, const struct kref * const k2);
@@ -510,6 +519,9 @@ kvmap_raw_inpw(const struct kvmap_api * const api, void * const map,
   extern void
 kvmap_raw_iter_seek(const struct kvmap_api * const api, void * const iter,
     const u32 len, const u8 * const ptr);
+
+  extern u64
+kvmap_dump_keys(const struct kvmap_api * const api, void * const map, const int fd);
 // }}} helpers
 
 // }}} kvmap
