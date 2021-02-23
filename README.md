@@ -74,8 +74,8 @@ and the rest cores belong to numa node 1.
 The default behavior is to use the cores from 16 to 19, which is a suboptimal setup.
 To avoid the performance penalty, one should set environment variable `XDB_CPU_LIST=core1,core2,...`
 to specify the cores used by the background threads.
-The number of cores can be from 1 to 8
-For the machine mentioned above, a preferred setup would be like this:
+The number of cores can be from 1 to 8.
+A preferred setup for the machine mentioned above would be like this:
 
 ```
 $ export XDB_CPU_LIST=12,14,16,18
