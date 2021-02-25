@@ -50,9 +50,11 @@ It also works with POSIX AIO on all the supported platforms but the performance 
 
     $ make CCC=gcc
 
-If jemalloc is available and you prefer to use it, use `M=j` with `make`:
+`jemalloc` is highly recommended. If jemalloc is available and you prefer to use it, use `M=j` with `make`:
 
     $ make M=j
+
+Similarly, `tcmalloc` can be linked with `M=t`.
 
 The `xdbdemo.c` contains sample code that uses the `remixdb_*` functions.
 These functions present a clean programming interface without using special data types or structures.
@@ -60,7 +62,7 @@ These functions present a clean programming interface without using special data
 ## xdbdemo
 To compile and run the demo code:
 
-    $ make xdbdemo.out
+    $ make M=j xdbdemo.out
     $ ./xdbdemo.out
 
 ## Configuration
@@ -88,7 +90,7 @@ $ ./xdbdemo.out
 
 Run with a 4GB block cache, 4GB MemTables, and a dataset with 32 million KVs:
 
-    $ make xdbtest.out
+    $ make M=j xdbtest.out
     $ ./xdbtest.out /tmp/xdbtest 4096 25 30
 
 If your memory is small, run with smaller sizes (a 256MB block cache, 256MB Memtables, and 1 million KVs):
