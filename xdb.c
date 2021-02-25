@@ -14,7 +14,7 @@
 
 // defs {{{
 #define XDB_COMP_CONC ((4)) // maximum compaction threads
-#define XDB_REJECT_SIZE_SHIFT ((3)) // reject up to 12.5%
+#define XDB_REJECT_SIZE_SHIFT ((4)) // reject up to 6.25%
 #define WAL_BLKSZ ((PGSZ << 6)) // 256KB
 // }}} defs
 
@@ -108,6 +108,14 @@ xdb_lock(struct xdb * const xdb)
 xdb_unlock(struct xdb * const xdb)
 {
   mutex_unlock(&xdb->lock);
+}
+
+  static inline bool
+xdb_mt_wal_full(struct xdb * const xdb)
+{
+  // mt is full OR wal is full
+  // when this is true: writers must wait; compaction should start
+  return (xdb->mtsz >= xdb->max_mtsz) || (xdb->wal.woff >= xdb->wal.maxsz);
 }
 // }}} misc
 
@@ -263,7 +271,7 @@ wal_close(struct wal * const wal)
 }
 // }}} wal
 
-// kv {{{
+// kv-alloc {{{
 // allocate one extra byte for refcnt
   static struct kv *
 xdb_new_ts(const struct kref * const kref)
@@ -287,7 +295,7 @@ xdb_dup_kv(const struct kv * const kv)
   memcpy(new, kv, sz);
   return new;
 }
-// }}} kv
+// }}} kv-alloc
 
 // xdb_ref {{{
   static inline void
@@ -376,7 +384,7 @@ xdb_unref(struct xdb_ref * const ref)
 }
 // }}} xdb_ref
 
-// comp {{{
+// reinsert {{{
 struct xdb_reinsert_merge_ctx {
   struct kv * kv;
   struct xdb * xdb;
@@ -443,15 +451,9 @@ xdb_reinsert_rejected(struct xdb * const xdb, void * const wmt_map, void * const
   kvmap_unref(imt_api, rej_ref);
   kvmap_unref(wmt_api, wmt_ref);
 }
+// }}} reinsert
 
-  static inline bool
-xdb_mt_wal_full(struct xdb * const xdb)
-{
-  // mt is full OR wal is full
-  // when this is true: writers must wait; compaction should start
-  return (xdb->mtsz >= xdb->max_mtsz) || (xdb->wal.woff >= xdb->wal.maxsz);
-}
-
+// comp {{{
 // compaction process:
 //   -** lock(xdb)
 //       - switch memtable mode from wmt-only to wmt+imt (very quick)
@@ -492,8 +494,8 @@ xdb_do_comp(struct xdb * const xdb, const u64 max_rejsz)
 
   xdb_unlock(xdb);
 
-  void * wmt_map = v_comp->wmt;
-  void * imt_map = v_comp->imt;
+  void * const wmt_map = v_comp->wmt;
+  void * const imt_map = v_comp->imt;
   // unlocked
   qsbr_wait(xdb->qsbr, (u64)v_comp);
 
@@ -601,10 +603,16 @@ xdb_compaction_worker(void * const ptr)
 }
 // }}} comp
 
-// open close {{{
+// recover {{{
+struct wal_kv {
+  struct kref kref;
+  u32 vlen;
+  u32 kvlen;
+};
+// Format: [klen-vi128, vlen-vi128, key-data, value-data, crc32c]
 // return the ptr after the decoded data if successful, otherwise return NULL
   static const u8 *
-wal_vi128_decode(const u8 * ptr, const u8 * const end, u32 * const out4, const u8 ** const pkv)
+wal_vi128_decode(const u8 * ptr, const u8 * const end, struct wal_kv * const wal_kv)
 {
   const u32 safelen = (end - ptr) < 10 ? (end - ptr) : 10;
   u32 count = 0;
@@ -631,11 +639,11 @@ wal_vi128_decode(const u8 * ptr, const u8 * const end, u32 * const out4, const u
   if (sum1 != sum2)
     return NULL;
 
-  out4[0] = klen;
-  out4[1] = vlen;
-  out4[2] = kvlen;
-  out4[3] = sum1;
-  *pkv = ptr;
+  wal_kv->kref.len = klen;
+  wal_kv->kref.hash32 = sum2;
+  wal_kv->kref.ptr = ptr;
+  wal_kv->vlen = vlen;
+  wal_kv->kvlen = kvlen;
   return ptr + kvlen + sizeof(u32);
 }
 
@@ -678,22 +686,22 @@ xdb_recover_fd(struct xdb * const xdb, const int fd)
   while ((iter < end) && ((*iter) == 0))
     iter++;
   while (iter < end) {
-    u32 out4[4];
-    const u8 * kvdata;
-    const u8 * const iter1 = wal_vi128_decode(iter, end, out4, &kvdata);
+    struct wal_kv wal_kv;
+    const u8 * const iter1 = wal_vi128_decode(iter, end, &wal_kv);
 
     // stop
     if (!iter1)
       break;
 
     // insert
-    struct kv * const kv = malloc(sizeof(struct kv) + out4[2]);
-    kv->klen = out4[0];
-    kv->vlen = out4[1];
-    kv->hash = kv_crc32c_extend(out4[3]);
-    memcpy(kv->kv, kvdata, out4[2]);
+    struct kv * const kv = malloc(sizeof(struct kv) + wal_kv.kvlen);
+    debug_assert(kv);
+    kv->klen = wal_kv.kref.len;
+    kv->vlen = wal_kv.vlen;
+    kv->hash = kv_crc32c_extend(wal_kv.kref.hash32);
+    memcpy(kv->kv, wal_kv.kref.ptr, wal_kv.kvlen);
     ctx.new_kv = kv;
-    bool s = kvmap_kv_merge(wmt_api, wmt_ref, kv, xdb_recover_update_func, &ctx);
+    bool s = wmt_api->merge(wmt_ref, &wal_kv.kref, xdb_recover_update_func, &ctx);
     if (!s)
       debug_die();
 
@@ -707,11 +715,12 @@ xdb_recover_fd(struct xdb * const xdb, const int fd)
   xdb->mtsz = ctx.mtsz;
   wmt_api->unref(wmt_ref);
   munmap(mem, fsize);
-  const u64 rsize = bits_round_up(iter - mem, 12);
+  const u64 rsize = (u64)(iter - mem);
   msstz_log(xdb->z, "%s fd %d fsize %lu rsize %lu nkeys %lu\n", __func__, fd, fsize, rsize, nkeys);
   return rsize;
 }
 
+// xdb must have everything in wal initialized as zero
   static void
 xdb_wal_recover(struct xdb * const xdb)
 {
@@ -764,8 +773,8 @@ xdb_wal_recover(struct xdb * const xdb)
     msstz_log(xdb->z, "%s wal comp zv0 %lu zv1 %lu rec %lu %lu mtsz %lu fd0 %d\n",
         __func__, v0, v1, r1, r0, xdb->mtsz, wal->fds[0]);
   } else { // one or no valid logs
-    wal->woff = xdb_recover_fd(xdb, wal->fds[0]);
-    if (wal->woff == 0) { // set version for an empty wal file
+    const u64 rsize = xdb_recover_fd(xdb, wal->fds[0]);
+    if (rsize == 0) { // set version for an empty wal file
       memcpy(wal->buf, &v0, sizeof(v0));
       wal->bufoff = sizeof(v0);
       wal->version = v0;
@@ -774,14 +783,25 @@ xdb_wal_recover(struct xdb * const xdb)
       // only one WAL: WAL version <= Z version
       if (wal->version > v0)
         debug_die();
-      msstz_log(xdb->z, "%s wal nbytes %lu mtsz %lu fd %d\n", __func__, wal->woff, xdb->mtsz, wal->fds[0]);
+      // woff must be aligned
+      wal->woff = bits_round_up(rsize, 12);
+      if (wal->woff > rsize) { // need to fill the gap with zeroes
+        const u64 nr = wal->woff - rsize;
+        u8 zeroes[PGSZ];
+        memset(zeroes, 0, nr);
+        pwrite(wal->fds[0], zeroes, nr, rsize);
+        fdatasync(wal->fds[0]);
+      }
+      msstz_log(xdb->z, "%s wal rsize %lu woff %lu mtsz %lu fd %d\n", __func__, rsize, wal->woff, xdb->mtsz, wal->fds[0]);
     }
     ftruncate(wal->fds[1], 0); // truncate the second wal anyway
     fdatasync(wal->fds[1]);
   }
   wal->soff = wal->woff;
 }
+// }}} recover
 
+// open close {{{
   struct xdb *
 xdb_open(const char * const dir, const size_t cache_size_mb, const size_t mt_size_mb, const size_t wal_size_mb,
     const u32 nr_workers, const u32 co_per_worker, const bool ckeys)
@@ -832,9 +852,9 @@ xdb_open(const char * const dir, const size_t cache_size_mb, const size_t mt_siz
     return xdb;
   } else { // failed
     if (xdb->mt1)
-      wormhole_destroy(xdb->mt1);
+      wmt_api->destroy(xdb->mt1);
     if (xdb->mt2)
-      wormhole_destroy(xdb->mt2);
+      wmt_api->destroy(xdb->mt2);
     if (xdb->z)
       msstz_destroy(xdb->z);
     if (xdb->qsbr)

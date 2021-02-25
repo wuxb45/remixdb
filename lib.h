@@ -597,6 +597,20 @@ slab_get_nready(struct slab * const slab);
 slab_destroy(struct slab * const slab);
 // }}}  slab
 
+// mpool {{{
+  extern struct mpool *
+mpool_create(void);
+
+  extern void
+mpool_destroy(struct mpool * const mp);
+
+  extern void *
+mpool_alloc(struct mpool * const mp, const size_t sz);
+
+  extern void
+mpool_free(struct mpool * const mp, void * const ptr);
+// }}} mpool
+
 // qsort {{{
   extern int
 compare_u16(const void * const p1, const void * const p2);

@@ -106,9 +106,7 @@ struct wormhole {
   struct wormhmap hmap2[2];
   // fifth line
   rwlock metalock;
-  au32 clean_seq;
-  u32 clean_ths;
-  u32 padding2[13];
+  u32 padding2[15];
 };
 
 struct wormhole_iter {
@@ -3029,72 +3027,39 @@ wormhole_clean_hmap(struct wormhole * const map)
   static void
 wormhole_free_leaf_keys(struct wormleaf * const leaf, kvmap_mm_free_func free_func, void * const free_priv)
 {
-  void * tmp = NULL;
-  for (u64 i = 0; i < WH_KPN; i++) {
-    if (leaf->eh[i].v64) {
-      void * const curr = u64_to_ptr(leaf->eh[i].e3);
-      cpu_prefetch0(curr);
-      if (tmp)
-        free_func(tmp, free_priv);
-      tmp = curr;
-    }
+  debug_assert(free_func);
+  const u64 nr = leaf->nr_keys;
+  for (u64 i = 0; i < nr; i++) {
+    debug_assert(leaf->es[i].v64);
+    void * const curr = u64_to_ptr(leaf->es[i].e3);
+    free_func(curr, free_priv);
   }
-  cpu_prefetch0(leaf->anchor);
-  if (tmp)
-    free_func(tmp, free_priv);
   wormhole_free_akey(leaf->anchor);
-}
-
-  static void *
-wormhole_clean_worker(void * const ptr)
-{
-  struct wormhole * const map = (typeof(map))ptr;
-  const u32 nr = map->clean_ths;
-  const u32 seq = atomic_fetch_add(&map->clean_seq, 1);
-  kvmap_mm_free_func free_func = map->mm.free;
-  void * const free_priv = map->mm.priv;
-
-  struct wormleaf * leaf = map->leaf0;
-  do {
-    for (u32 x = 0; leaf && (x < nr); x++) {
-      if (x == seq)
-        wormhole_free_leaf_keys(leaf, free_func, free_priv);
-      leaf = leaf->next;
-    }
-  } while (leaf);
-  return NULL;
-}
-
-// unsafe
-  static void
-wormhole_clean_free(struct wormhole * const map, const u32 ths)
-{
-  wormhole_clean_hmap(map);
-  map->clean_seq = 0;
-  map->clean_ths = ths;
-  thread_fork_join(ths, wormhole_clean_worker, false, map);
-  slab_free_all(map->slab_leaf);
-  map->leaf0 = NULL;
-}
-
-  inline void
-wormhole_clean_th(struct wormhole * const map, const u32 ths)
-{
-  wormhole_clean_free(map, ths);
-  wormhole_create_leaf0(map);
 }
 
 // unsafe
   void
 wormhole_clean(struct wormhole * const map)
 {
-  wormhole_clean_th(map, 2);
+  wormhole_clean_hmap(map);
+  kvmap_mm_free_func free_func = map->mm.free;
+  if (free_func) {
+    void * const free_priv = map->mm.priv;
+    for (struct wormleaf * leaf = map->leaf0; leaf; leaf = leaf->next)
+      wormhole_free_leaf_keys(leaf, free_func, free_priv);
+  } else { // no free
+    for (struct wormleaf * leaf = map->leaf0; leaf; leaf = leaf->next)
+      wormhole_free_akey(leaf->anchor);
+  }
+  slab_free_all(map->slab_leaf);
+  map->leaf0 = NULL;
+  wormhole_create_leaf0(map);
 }
 
   void
 wormhole_destroy(struct wormhole * const map)
 {
-  wormhole_clean_free(map, 2);
+  wormhole_clean(map);
   for (u64 x = 0; x < 2; x++)
     wormhole_hmap_deinit(&(map->hmap2[x]));
   qsbr_destroy(map->qsbr);

@@ -4819,8 +4819,8 @@ msstz_comp_worker(void * const ptr)
   static int
 msstz_cmp_ratio(const void * p1, const void * p2)
 {
-  const float r1 = ((const struct msstz_comp_part * const)p1)->ratio;
-  const float r2 = ((const struct msstz_comp_part * const)p2)->ratio;
+  const float r1 = ((const struct msstz_comp_part *)p1)->ratio;
+  const float r2 = ((const struct msstz_comp_part *)p2)->ratio;
   debug_assert(isfinite(r1));
   debug_assert(isfinite(r2));
   if (r1 < r2) {

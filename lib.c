@@ -18,6 +18,7 @@
 #include <poll.h>
 #include <sys/ioctl.h>
 #include <time.h>
+#include <malloc.h>  // malloc_usable_size
 
 #if defined(__linux__)
 #include <linux/fs.h>
@@ -2380,19 +2381,109 @@ oalloc_destroy(struct oalloc * const o)
 }
 // }}} oalloc
 
+// astk {{{
+// atomic stack
+struct acell { struct acell * next; };
+
+// extract ptr from m value
+  static inline struct acell *
+astk_ptr(const u64 m)
+{
+  return (struct acell *)(m >> 16);
+}
+
+// calculate the new magic
+  static inline u64
+astk_m1(const u64 m0, struct acell * const ptr)
+{
+  return ((m0 + 1) & 0xfffflu) | (((u64)ptr) << 16);
+}
+
+// calculate the new magic
+  static inline u64
+astk_m1_unsafe(struct acell * const ptr)
+{
+  return ((u64)ptr) << 16;
+}
+
+  static bool
+astk_try_push(au64 * const pmagic, struct acell * const first, struct acell * const last)
+{
+  u64 m0 = atomic_load_explicit(pmagic, MO_CONSUME);
+  last->next = astk_ptr(m0);
+  const u64 m1 = astk_m1(m0, first);
+  return atomic_compare_exchange_weak_explicit(pmagic, &m0, m1, MO_RELEASE, MO_RELAXED);
+}
+
+  static void
+astk_push_safe(au64 * const pmagic, struct acell * const first, struct acell * const last)
+{
+  while (!astk_try_push(pmagic, first, last));
+}
+
+  static void
+astk_push_unsafe(au64 * const pmagic, struct acell * const first,
+    struct acell * const last)
+{
+  const u64 m0 = atomic_load_explicit(pmagic, MO_CONSUME);
+  last->next = astk_ptr(m0);
+  const u64 m1 = astk_m1_unsafe(first);
+  atomic_store_explicit(pmagic, m1, MO_RELAXED);
+}
+
+// can fail for two reasons: (1) NULL: no available object; (2) ~0lu: contention
+  static void *
+astk_try_pop(au64 * const pmagic)
+{
+  u64 m0 = atomic_load_explicit(pmagic, MO_CONSUME);
+  struct acell * const ret = astk_ptr(m0);
+  if (ret == NULL)
+    return NULL;
+
+  const u64 m1 = astk_m1(m0, ret->next);
+  if (atomic_compare_exchange_weak_explicit(pmagic, &m0, m1, MO_ACQUIRE, MO_RELAXED))
+    return ret;
+  else
+    return (void *)(~0lu);
+}
+
+  static void *
+astk_pop_safe(au64 * const pmagic)
+{
+  do {
+    u64 m0 = atomic_load_explicit(pmagic, MO_CONSUME);
+    struct acell * const ret = astk_ptr(m0);
+    if (ret == NULL)
+      return NULL;
+
+    const u64 m1 = astk_m1(m0, ret->next);
+    if (atomic_compare_exchange_weak_explicit(pmagic, &m0, m1, MO_ACQUIRE, MO_RELAXED))
+      return ret;
+  } while (true);
+}
+
+  static void *
+astk_pop_unsafe(au64 * const pmagic)
+{
+  const u64 m0 = atomic_load_explicit(pmagic, MO_CONSUME);
+  struct acell * const ret = astk_ptr(m0);
+  if (ret == NULL)
+    return NULL;
+
+  const u64 m1 = astk_m1_unsafe(ret->next);
+  atomic_store_explicit(pmagic, m1, MO_RELAXED);
+  return (void *)ret;
+}
+// }}} astk
+
 // slab {{{
 #define SLAB_OBJ0_OFFSET ((64))
-struct slab_object {
-  struct slab_object * next;
-};
-
 struct slab {
-  //struct slab_object * obj_head;
   au64 magic; // hi 48: ptr, lo 16: seq
   u64 padding1[7];
 
   // 2nd line
-  struct slab_object * blk_head; // list of all blocks
+  struct acell * blk_head; // list of all blocks
   u64 nalloc; // UNSAFE!
   u64 nready; // UNSAFE!
   u64 obj_size; // const: aligned size of each object
@@ -2406,72 +2497,23 @@ struct slab {
 };
 
   static void
-slab_push_safe(struct slab * const slab, struct slab_object * const obj_head,
-    struct slab_object * const obj_last)
-{
-  do {
-    u64 m0 = atomic_load_explicit(&slab->magic, MO_CONSUME);;
-    obj_last->next = (void *)(m0 >> 16);
-    const u64 m1 = ((m0 + 1) & 0xfffflu) | (((u64)obj_head) << 16);
-    if (atomic_compare_exchange_weak_explicit(&slab->magic, &m0, m1, MO_RELEASE, MO_RELAXED))
-      return;
-  } while (true);
-}
-
-  static void
-slab_push_unsafe(struct slab * const slab, struct slab_object * const obj_head,
-    struct slab_object * const obj_last)
-{
-  const u64 m0 = atomic_load_explicit(&slab->magic, MO_CONSUME);
-  obj_last->next = (void *)(m0 >> 16);
-  const u64 m1 = ((m0 + 1) & 0xfffflu) | (((u64)obj_head) << 16);
-  atomic_store_explicit(&slab->magic, m1, MO_RELAXED);
-}
-
-  static void *
-slab_pop_safe(struct slab * const slab)
-{
-  do {
-    u64 m0 = atomic_load_explicit(&slab->magic, MO_CONSUME);
-    struct slab_object * const ret = (typeof(ret))(m0 >> 16);
-    if (ret == NULL)
-      return ret;
-    const u64 m1 = ((m0 + 1) & 0xfffflu) | (((u64)ret->next) << 16);
-    if (atomic_compare_exchange_weak_explicit(&slab->magic, &m0, m1, MO_ACQUIRE, MO_RELAXED))
-      return ret;
-  } while (true);
-}
-
-  static void *
-slab_pop_unsafe(struct slab * const slab)
-{
-  const u64 m0 = atomic_load_explicit(&slab->magic, MO_CONSUME);
-  struct slab_object * const ret = (typeof(ret))(m0 >> 16);
-  if (ret == NULL)
-    return ret;
-  const u64 m1 = ((m0 + 1) & 0xfffflu) | (((u64)ret->next) << 16);
-  atomic_store_explicit(&slab->magic, m1, MO_RELAXED);
-  return (void *)ret;
-}
-
-  static void
-slab_add_block(struct slab * const slab, struct slab_object * const blk, const bool safe)
+slab_add_block(struct slab * const slab, struct acell * const blk, const bool safe)
 {
   blk->next = slab->blk_head;
   slab->blk_head = blk;
 
   u8 * const base = ((u8 *)blk) + slab->obj0_offset;
-  struct slab_object * iter = (typeof(iter))base; // [0]
+  struct acell * iter = (typeof(iter))base; // [0]
   for (u64 i = 1; i < slab->objs_per_slab; i++) {
-    struct slab_object * const next = (typeof(next))(base + (i * slab->obj_size));
+    struct acell * const next = (typeof(next))(base + (i * slab->obj_size));
     iter->next = next;
     iter = next;
   }
   // base points to the first block; iter points to the last block
   if (safe) {
-    slab_push_safe(slab, (struct slab_object *)base, iter);
+    astk_push_safe(&slab->magic, (struct acell *)base, iter);
   } else { // unsafe
-    slab_push_unsafe(slab, (struct slab_object *)base, iter);
+    astk_push_unsafe(&slab->magic, (struct acell *)base, iter);
     slab->nready += slab->objs_per_slab;
   }
 }
@@ -2480,7 +2522,7 @@ slab_add_block(struct slab * const slab, struct slab_object * const blk, const b
 slab_expand(struct slab * const slab, const bool safe)
 {
   size_t blk_size;
-  struct slab_object * const blk = pages_alloc_best(slab->blk_size, true, &blk_size);
+  struct acell * const blk = pages_alloc_best(slab->blk_size, true, &blk_size);
   (void)blk_size;
   if (blk == NULL)
     return false;
@@ -2535,11 +2577,11 @@ slab_reserve_unsafe(struct slab * const slab, const u64 nr)
   void *
 slab_alloc_unsafe(struct slab * const slab)
 {
-  void * ret = slab_pop_unsafe(slab);
+  void * ret = astk_pop_unsafe(&slab->magic);
   if (ret == NULL) {
     if (!slab_expand(slab, false))
       return NULL;
-    ret = slab_pop_unsafe(slab);
+    ret = astk_pop_unsafe(&slab->magic);
   }
   debug_assert(ret);
   slab->nready--;
@@ -2550,13 +2592,13 @@ slab_alloc_unsafe(struct slab * const slab)
   void *
 slab_alloc_safe(struct slab * const slab)
 {
-  void * ret = slab_pop_safe(slab);
+  void * ret = astk_pop_safe(&slab->magic);
   if (ret)
     return ret;
 
   mutex_lock(&slab->lock);
   do {
-    ret = slab_pop_safe(slab); // may already have new objs
+    ret = astk_pop_safe(&slab->magic); // may already have new objs
     if (ret)
       break;
     if (!slab_expand(slab, true))
@@ -2570,7 +2612,7 @@ slab_alloc_safe(struct slab * const slab)
 slab_free_unsafe(struct slab * const slab, void * const ptr)
 {
   debug_assert(ptr);
-  slab_push_unsafe(slab, ptr, ptr);
+  astk_push_unsafe(&slab->magic, ptr, ptr);
   slab->nready++;
   slab->nalloc--;
 }
@@ -2578,20 +2620,20 @@ slab_free_unsafe(struct slab * const slab, void * const ptr)
   void
 slab_free_safe(struct slab * const slab, void * const ptr)
 {
-  slab_push_safe(slab, ptr, ptr);
+  astk_push_safe(&slab->magic, ptr, ptr);
 }
 
 // unsafe
   void
 slab_free_all(struct slab * const slab)
 {
-  struct slab_object * iter = slab->blk_head;
+  struct acell * iter = slab->blk_head;
   slab->magic = 0;
   slab->blk_head = NULL;
   slab->nalloc = 0;
   slab->nready = 0;
   while (iter) {
-    struct slab_object * const next = iter->next;
+    struct acell * const next = iter->next;
     slab_add_block(slab, iter, false);
     iter = next;
   }
@@ -2616,15 +2658,110 @@ slab_destroy(struct slab * const slab)
 {
   if (slab == NULL)
     return;
-  struct slab_object * iter = slab->blk_head;
+  struct acell * iter = slab->blk_head;
   while (iter) {
-    struct slab_object * const next = iter->next;
+    struct acell * const next = iter->next;
     pages_unmap(iter, slab->blk_size);
     iter = next;
   }
   free(slab);
 }
 // }}} slab
+
+// mpool {{{
+#define MPOOL_RANKS ((128lu))
+#define MPOOL_SHARDS ((8lu))
+#define MPOOL_SHARD_MASK ((MPOOL_SHARDS - 1lu))
+
+struct mpool {
+  au64 vec[MPOOL_RANKS][MPOOL_SHARDS][8]; // only use vec[x][y][0]
+};
+
+static __thread u64 mpool_seq = 0;
+
+  struct mpool *
+mpool_create(void)
+{
+  size_t memsz;
+  struct mpool * const ret = pages_alloc_best(sizeof(*ret), false, &memsz);
+  if (ret == NULL)
+    return NULL;
+
+  debug_assert(memsz == sizeof(*ret));
+  return ret;
+}
+
+  void
+mpool_destroy(struct mpool * const mp)
+{
+  for (u64 i = 0; i < MPOOL_RANKS; i++) {
+    for (u64 j = 0; j < MPOOL_SHARDS; j++) {
+      au64 * const pmagic = mp->vec[i][j];
+      for (void * ptr = astk_pop_unsafe(pmagic); ptr; ptr = astk_pop_unsafe(pmagic))
+        free(ptr);
+    }
+  }
+  pages_unmap(mp, sizeof(*mp));
+}
+
+  static size_t
+mpool_rank(const size_t sz)
+{
+  // 0 -> large number
+  // 1..8 -> 0
+  // 9..16 -> 1
+  // 1017..1024 -> 127
+  // 1025..1032 -> 128
+  return (sz - 1) >> 3;
+}
+
+  void *
+mpool_alloc(struct mpool * const mp, const size_t sz)
+{
+  const size_t rank = mpool_rank(sz);
+  if (rank < MPOOL_RANKS) {
+    void * const ret = astk_try_pop(mp->vec[rank][mpool_seq]);
+    if (ret) {
+      if (~(u64)ret) { // success
+        return ret;
+      } else { // contention
+        mpool_seq = (mpool_seq + 1) & MPOOL_SHARD_MASK;
+      }
+    }
+  }
+  return malloc(sz);
+}
+
+  static size_t
+mpool_usize(void * const ptr)
+{
+  const size_t sz = malloc_usable_size(ptr);
+#ifdef HEAPCHECKING
+  // valgrind and asan may return unaligned usable size
+  const size_t rsz = sz & (~7lu);
+#else // HEAPCHECKING
+  const size_t rsz = sz;
+#endif // HEAPCHECKING
+
+  debug_assert((rsz & 0x7lu) == 0);
+  return rsz;
+}
+
+  void
+mpool_free(struct mpool * const mp, void * const ptr)
+{
+  const size_t rsz = mpool_usize(ptr);
+  const size_t rank = mpool_rank(rsz);
+
+  if (rank < MPOOL_RANKS) {
+    if (astk_try_push(mp->vec[rank][mpool_seq], ptr, ptr))
+      return;
+    else
+      mpool_seq = (mpool_seq + 1) & MPOOL_SHARD_MASK;
+  }
+  free(ptr);
+}
+// }}} mpool
 
 // qsort {{{
   int
