@@ -2643,6 +2643,22 @@ msstb_use_ckeys(struct msst * const msstx1)
 // }}} sstc_iter
 
 // msstb {{{
+
+// msstb: a special kind of iterator structure for building ssty (REMIX)
+// There are three instantces of an msstb
+// An msstz-compaction always write new tables sequentially (a sorted view),
+// and the existing data are already sorted (another sorted view).
+// both msstb2 and msstbc perform a two-way merge between the old and new data.
+// msstb2 uses the key-value data. It uses binary searches to find merge points.
+// msstbc uses the ckeys to perform a regular two-way merge.
+// msstbc is the most (I/O) efficient one.
+
+// If the input data does not qualify for a two-way merge, msstbm should be used.
+// msstbm can be used to create ssty (REMIX) for any kind of inputs (e.g., overlapping).
+// msstbm uses miter to perform multi-way merge.
+// msstbm automatically uses ckeys if every input table contains ckeys.
+// A rough comparison of speed: fast | msstbc > msstbm+ckeys <?> msstb2 > msstbm | slow
+
 struct msstb {
   u32 rankenc; // the current rank
   u32 idx; // index on the full sorted view
@@ -4674,7 +4690,7 @@ msstz_analyze_worker(void * const ptr)
 // part {{{
 // do compaction in a partition; bestway decides what to do
   static u64
-msstz_comp_x(struct msstz_comp_info * const ci, const u64 ipart)
+msstz_comp_part(struct msstz_comp_info * const ci, const u64 ipart)
 {
   const u64 t0 = time_nsec();
   struct msstz * const z = ci->z;
@@ -4760,7 +4776,7 @@ msstz_comp_worker_func(struct msstz_comp_info * const ci)
     if (i >= n)
       break;
 
-    ci->time_comp_x += msstz_comp_x(ci, i);
+    ci->time_comp_x += msstz_comp_part(ci, i);
 
     const u64 t0 = time_nsec();
     if (msstz_yq_consume(ci))
@@ -4835,8 +4851,8 @@ msstz_cmp_ratio(const void * p1, const void * p2)
   static int
 msstz_cmp_idx(const void * p1, const void * p2)
 {
-  const u64 * const v1 = &(((const struct msstz_comp_part * const)p1)->idx);
-  const u64 * const v2 = &(((const struct msstz_comp_part * const)p2)->idx);
+  const u64 * const v1 = &(((const struct msstz_comp_part *)p1)->idx);
+  const u64 * const v2 = &(((const struct msstz_comp_part *)p2)->idx);
   return compare_u64(v1, v2);
 }
 

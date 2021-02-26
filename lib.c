@@ -18,15 +18,17 @@
 #include <poll.h>
 #include <sys/ioctl.h>
 #include <time.h>
-#include <malloc.h>  // malloc_usable_size
 
 #if defined(__linux__)
 #include <linux/fs.h>
+#include <malloc.h>  // malloc_usable_size
 #elif defined(__APPLE__) && defined(__MACH__)
 #include <sys/disk.h>
+#include <malloc/malloc.h>
 #elif defined(__FreeBSD__)
 #include <sys/disk.h>
-#endif
+#include <malloc_np.h>
+#endif // OS
 
 #if defined(__FreeBSD__)
 #include <pthread_np.h>
@@ -493,7 +495,7 @@ debug_perf_init(void)
     perf_pid = ppid;
   }
 }
-#endif
+#endif // __linux__
 
   bool
 debug_perf_switch(void)
@@ -756,7 +758,7 @@ thread_getaffinity_set(cpu_set_t * const cpuset)
 #elif defined(__APPLE__) && defined(__MACH__)
   *cpuset = (1lu << process_ncpu) - 1;
   return (int)process_ncpu; // TODO
-#endif
+#endif // OS
 }
 
   static inline int
@@ -769,7 +771,7 @@ thread_setaffinity_set(const cpu_set_t * const cpuset)
 #elif defined(__APPLE__) && defined(__MACH__)
   (void)cpuset; // TODO
   return 0;
-#endif
+#endif // OS
 }
 
   void
@@ -783,7 +785,7 @@ thread_get_name(const pthread_t pt, char * const name, const size_t len)
   (void)pt;
   (void)len;
   strcpy(name, "unknown"); // TODO
-#endif
+#endif // OS
 }
 
   void
@@ -796,7 +798,7 @@ thread_set_name(const pthread_t pt, const char * const name)
 #elif defined(__APPLE__) && defined(__MACH__)
   (void)pt;
   (void)name; // TODO
-#endif
+#endif // OS
 }
 
 // kB
@@ -2097,7 +2099,7 @@ fdsize(const int fd)
     st.st_size = blksz * nblks;
 #elif defined(__FreeBSD__)
     ioctl(fd, DIOCGMEDIASIZE, &st.st_size);
-#endif
+#endif // OS
   }
 
   return st.st_size;
@@ -2669,6 +2671,7 @@ slab_destroy(struct slab * const slab)
 // }}} slab
 
 // mpool {{{
+// TODO: mpool is experimental
 #define MPOOL_RANKS ((128lu))
 #define MPOOL_SHARDS ((8lu))
 #define MPOOL_SHARD_MASK ((MPOOL_SHARDS - 1lu))
@@ -2735,7 +2738,14 @@ mpool_alloc(struct mpool * const mp, const size_t sz)
   static size_t
 mpool_usize(void * const ptr)
 {
+#if defined(__linux__)
   const size_t sz = malloc_usable_size(ptr);
+#elif defined(__FreeBSD__)
+  const size_t sz = malloc_usable_size(ptr);
+#elif defined(__APPLE__) && defined(__MACH__)
+  const size_t sz = malloc_size(ptr);
+#endif // OS
+
 #ifdef HEAPCHECKING
   // valgrind and asan may return unaligned usable size
   const size_t rsz = sz & (~7lu);
@@ -3368,13 +3378,11 @@ vctr_destroy(struct vctr * const v)
 #define GEN_UNIFORM ((13))      // Uniformly distributed in an interval [a,b]
 #define GEN_TRACE32 ((14))      // Read from a trace file with unit of u32.
 #define GEN_LATEST  ((15))      // latest (moving head - zipfian)
-
 #define GEN_ASYNC  ((255))      // async gen
 
 struct rgen_linear { // 8x4
   union { au64 ac; u64 uc; };
-  u64 base;
-  u64 mod;
+  u64 base, mod;
   union { s64 inc; u64 inc_u64; };
 };
 
@@ -3384,35 +3392,23 @@ struct rgen_expo { // 8
 
 struct rgen_trace32 { // 8x5
   FILE * fin;
-  u64 idx;
-  u64 avail;
-  u64 bufnr;
+  u64 idx, avail, bufnr;
   u32 * buf;
 };
 
 struct rgen_zipfian { // 8x9
-  u64 mod;
-  u64 base;
-  double quick1;
-  double mod_d;
-  double zetan;
-  double alpha;
-  double quick2;
-  double eta;
-  double theta;
+  u64 mod, base;
+  double quick1, mod_d, zetan, alpha, quick2, eta, theta;
 };
 
 struct rgen_uniform { // 8x3
-  u64 base;
-  u64 mod;
+  u64 base, mod;
   double mul;
 };
 
 struct rgen_unizipf { // 8x12
   struct rgen_zipfian zipfian;
-  u64 usize;
-  u64 zsize;
-  u64 base;
+  u64 usize, zsize, base;
 };
 
 struct rgen_xzipfian { // 8x10
@@ -3465,23 +3461,22 @@ struct rgen {
     struct rgen_async        async;
   };
   rgen_next_func next;
-  union {
+  union { // NULL by default
     rgen_next_func next_nowait; // async only
     rgen_next_func next_write; // latest only
   };
-  u64 min;
-  u64 max;
+  u64 min, max;
   u8 type; // use to be a enum
   bool unit_u64;
   bool async_worker; // has an async worker running
   bool shared; // don't copy in rgen_fork()
 };
 
-  static void
+  static inline void
 rgen_set_next(struct rgen * const gen, rgen_next_func next)
 {
   gen->next = next;
-  gen->next_nowait = NULL;
+  gen->next_nowait = NULL; // by default next_nowait/next_write = NULL
 }
 // }}} struct
 

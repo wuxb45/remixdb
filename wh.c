@@ -1593,14 +1593,12 @@ wormhole_leaf_remove(struct wormleaf * const leaf, const u64 im)
 {
   const u64 nr_keys = leaf->nr_keys;
   const u64 v64 = leaf->eh[im].v64;
-  debug_assert(v64);
+  debug_assert(v64 && nr_keys);
   // remove from es
   u64 is;
   for (is = 0; is < nr_keys; is++) {
     if (leaf->es[is].v64 == v64) {
-      if (is < (nr_keys - 1))
-        leaf->es[is] = leaf->es[nr_keys - 1];
-
+      leaf->es[is] = leaf->es[nr_keys - 1];
       break;
     }
   }
@@ -1672,8 +1670,7 @@ wormhole_leaf_update(struct wormhole * const map, struct wormleaf * const leaf, 
   struct entry13 * const e = &(leaf->eh[im]);
   struct kv * const old = u64_to_ptr(e->e3);
   debug_assert(old);
-  if (map->mm.free)
-    map->mm.free(old, map->mm.priv);
+  map->mm.free(old, map->mm.priv);
 
   e->e3 = ptr_to_u64(new);
   // e1 remains unchanged
@@ -2530,9 +2527,8 @@ whunsafe_merge_meta_leaf(struct wormhole * const map, struct wormleaf * const le
   static void
 wormhole_del_helper_ref(struct wormref * const ref, struct wormleaf * const leaf)
 {
-  const u64 n1 = leaf->nr_keys;
-  const u64 n2 = leaf->next ? leaf->next->nr_keys : WH_KPN;
-  if ((leaf->next && (n1 == 0)) || ((n1 + n2) < WH_KPN_MRG)) {
+  struct wormleaf * const next = leaf->next;
+  if (next && ((leaf->nr_keys == 0) || ((leaf->nr_keys + next->nr_keys) < WH_KPN_MRG))) {
     // try merge, it may fail if malloc fails
     (void)wormhole_merge_meta_leaf_ref(ref, leaf);
     // locks are already released; immediately return
@@ -2548,9 +2544,11 @@ wormhole_del(struct wormref * const ref, const struct kref * const key)
   const u64 im = wormhole_leaf_match(leaf, key);
   if (im < WH_KPN) { // found
     struct kv * const kv = wormhole_leaf_remove(leaf, im);
-    debug_assert(kv);
-    ref->map->mm.free(kv, ref->map->mm.priv);
     wormhole_del_helper_ref(ref, leaf);
+    debug_assert(kv);
+    // free after releasing locks
+    struct wormhole * const map = ref->map;
+    map->mm.free(kv, map->mm.priv);
     return true;
   } else {
     rwlock_unlock_write(&(leaf->leaflock));

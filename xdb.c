@@ -65,7 +65,7 @@ struct xdb {
   void * mt2;
   struct mt_pair mt_views[4];
   u64 padding2[7];
-  mutex lock;
+  spinlock lock;
 };
 
 struct xdb_ref {
@@ -101,13 +101,13 @@ static const struct kvmap_api * imt_api = &kvmap_api_whunsafe;
   static inline void
 xdb_lock(struct xdb * const xdb)
 {
-  mutex_lock(&xdb->lock);
+  spinlock_lock(&xdb->lock);
 }
 
   static inline void
 xdb_unlock(struct xdb * const xdb)
 {
-  mutex_unlock(&xdb->lock);
+  spinlock_unlock(&xdb->lock);
 }
 
   static inline bool
@@ -837,7 +837,7 @@ xdb_open(const char * const dir, const size_t cache_size_mb, const size_t mt_siz
   xdb->wal.maxsz = wal_size_mb << 20;
   xdb->max_rejsz = xdb->max_mtsz >> XDB_REJECT_SIZE_SHIFT;
 
-  mutex_init(&xdb->lock);
+  spinlock_init(&xdb->lock);
   xdb->nr_workers = nr_workers; // internal parallelism
   xdb->co_per_worker = co_per_worker;
   xdb->running = true;
@@ -873,7 +873,6 @@ xdb_close(struct xdb * xdb)
   xdb->running = false;
   pthread_join(xdb->comp_pid, NULL);
 
-  mutex_deinit(&xdb->lock);
   // assume all users have left
   qsbr_destroy(xdb->qsbr);
 

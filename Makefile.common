@@ -7,7 +7,7 @@ HDR = $(addsuffix .h,$(MODULES) $(HEADERS))
 SRC = $(addsuffix .c,$(MODULES) $(SOURCES))
 ASM = $(addsuffix .S,$(ASSMBLY))
 OBJ = $(addsuffix .o,$(MODULES) $(SOURCES) $(ASSEMBLY))
-DEP = Makefile $(HDR) $(EXTERNDEP) $(EXTERNSRC)
+DEP = Makefile.common Makefile $(HDR) $(EXTERNDEP) $(EXTERNSRC)
 BIN = $(addsuffix .out,$(TARGETS))
 DIS = $(addsuffix .dis,$(TARGETS))
 
@@ -94,6 +94,9 @@ ifeq ($(UNAME_M),aarch64) # "native" does not work for clang@aarch64
 else ifeq ($(UNAME_M),x86_64)
   CHECK_M := -D__x86_64__
   ARCH ?= native
+else ifeq ($(UNAME_M),amd64) # freebsd
+  CHECK_M := -D__x86_64__
+  ARCH ?= native
 else
   $(error "Supported Platforms: aarch64, x86_64")
 endif
@@ -109,18 +112,22 @@ FLG += -pthread -Wall -Wextra -Wshadow #-Weverything
 FLG += $(addprefix -fno-builtin-,$(NBI))
 FLG += $(OPT)
 
-ifeq ($(CCC),clang)
+ifneq ($(shell $(CCC) --version 2>/dev/null | grep clang),)
 FLG += -ferror-limit=3
-else ifeq ($(CCC),gcc)
+CCCTYPE := clang
+else ifneq ($(shell $(CCC) --version 2>/dev/null | grep gcc),)
 FLG += -fmax-errors=3
 FLG += -Wno-unknown-pragmas
+CCCTYPE := gcc
+else
+  $(error "Supported Compilers: clang, gcc")
 endif
 
-ifeq ($(CCC),clang)
-  CCINST = /usr/lib/clang/$(shell clang --version | awk '/^clang/ { print $$3 }')
+ifeq ($(CCCTYPE),clang)
+  CCINST = /usr/lib/clang/$(shell $(CCC) --version 2>/dev/null | awk '/^clang/ { print $$3 }')
   CCINC = $(CCINST)/include
-else ifeq ($(CCC),gcc)
-  CCINST = /usr/lib/gcc/$(shell gcc -dumpmachine)/$(shell gcc -dumpversion)
+else ifeq ($(CCCTYPE),gcc)
+  CCINST = /usr/lib/gcc/$(shell $(CCC) -dumpmachine)/$(shell $(CCC) -dumpversion)
   CCINC = $(CCINST)/include $(CCINST)/include-fixed
 endif
 CCINC = /usr/include /usr/local/include
