@@ -6,12 +6,6 @@ This repository maintains a reference implementation of the REMIX index data str
 as well as a thread-safe embedded key-value store implementation, namely RemixDB.
 It compiles on recent Linux/FreeBSD/MacOS and supports x86\_64 and AArch64 CPUs.
 
-# Limitations of the Current Implementation
-
-* *KV size*: The maximum key+value size is capped at 65500 bytes.
-This roughly corresponds to the 64KB block size limit.
-TODO: store every huge value in a separate file and record the file name as the value of the KV pair in RemixDB.
-
 # Optimization: Minimizing REMIX (Re-)Building Cost
 
 This implementation employs an optimization to minimize the REMIX building cost.
@@ -39,7 +33,11 @@ You should use `remixdb_open` unless it's absolutely necessary to save a little 
 `remixdb_open_compact` opens a remixdb with the optimization turned off. Each newly created sstable will not contain a CKB.
 A store created by one of these functions can be safely opened by the other function.
 
-TODO: compress the CKB with lz4/zstd/etc.?
+# Limitations of the Current Implementation
+
+* *KV size*: The maximum key+value size is capped at 65500 bytes.
+This roughly corresponds to the 64KB block size limit.
+TODO: store huge KV pairs in a separate file and store the file address of the KV pair in RemixDB.
 
 # Getting Started
 
