@@ -39,9 +39,9 @@ main(int argc, char ** argv)
   printf("remixdb_get remix %c %u %.*s\n", r?'T':'F', vlen_out, vlen_out, vbuf_out);
 
   // prepare a few keys for range ops
-  r = remixdb_set(ref, "00", 2, "0_value", 7);
-  r = remixdb_set(ref, "11", 2, "1_value", 7);
-  r = remixdb_set(ref, "22", 2, "2_value", 7);
+  remixdb_set(ref, "00", 2, "0_value", 7);
+  remixdb_set(ref, "11", 2, "1_value", 7);
+  remixdb_set(ref, "22", 2, "2_value", 7);
 
   struct xdb_iter * const iter = remixdb_iter_create(ref);
 

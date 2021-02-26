@@ -4,12 +4,13 @@
  * All rights reserved. No warranty, explicit or implicit, provided.
  */
 #pragma once
-#ifdef __cplusplus
-extern "C" {
-#endif
 
 #include <stdint.h>
 #include <stdbool.h>
+
+#ifdef __cplusplus
+extern "C" {
+#endif
 
 struct xdb;
 struct xdb_ref;

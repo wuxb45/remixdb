@@ -25,24 +25,48 @@ main(int argc, char** argv)
   }
   struct xdb_ref * const ref = remixdb_ref(xdb);
 
-  u64 k0 = 0;
+  struct xdb_iter * const iter = remixdb_iter_create(ref);
+  u64 kid = 0;
+  remixdb_iter_seek(iter, "", 0);
+  remixdb_iter_skip(iter, 1000);
   u8 key[20];
-  for (;;) {
-    strdec_64(key, k0);
-    if (!remixdb_probe(ref, key, 20)) {
-      printf("first missing %lu\n", k0);
-      break;
+  u8 keycmp[20];
+  u32 klen = 0;
+  while (remixdb_iter_valid(iter)) {
+    kid += 1000;
+    remixdb_iter_peek(iter, key, &klen, NULL, NULL);
+    strdec_64(keycmp, kid);
+    if (memcmp(key, keycmp, 20)) {
+      printf("key mismatch at %lu; delete %s and restart the loop\n", kid, argv[1]);
+      exit(0);
     }
-    k0++;
+    remixdb_iter_skip(iter, 1000);
   }
+
+  u64 count = kid;
+  remixdb_iter_seek(iter, "", 0);
+  remixdb_iter_skip(iter, kid);
+  while (remixdb_iter_valid(iter)) {
+    remixdb_iter_peek(iter, key, &klen, NULL, NULL);
+    remixdb_iter_skip(iter, 1);
+    strdec_64(keycmp, count);
+    count++;
+    if (memcmp(key, keycmp, 20)) {
+      printf("key mismatch at %lu; delete %s and restart loop again\n", count, argv[1]);
+      exit(0);
+    }
+  }
+  printf("found %lu keys, last %.20s OK\n", count, key);
+  remixdb_iter_destroy(iter);
 
   u8 value[1024];
   memset(value, 0x11, 1024);
-  for (u64 i = 0; i < 1000000; i++) {
-    strdec_64(key, k0 + i);
+#define NEW ((100000))
+  for (u64 i = 0; i < NEW; i++) {
+    strdec_64(key, count + i);
     remixdb_set(ref, key, 20, value, 1024);
   }
-  printf("inserted [%lu, %lu)\n", k0, k0 + 1000000);
+  printf("insert [%lu, %lu]; now exit()\n", count, count + NEW - 1);
   remixdb_sync(ref);
   exit(0);
   return 0;
