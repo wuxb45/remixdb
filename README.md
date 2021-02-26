@@ -107,6 +107,21 @@ It inserts some new keys and calls `remixdb_sync()` to make all buffered data pe
 Then it immediately calls `exit()` without doing any clean-up.
 Run it repeatedly. In each run it should show that all the previously inserted KVs are found.
 
+Run with a small footprint:
+
+    $ for i in $(seq 1 30); do ./xdbexit.out ./dbdir 256 256; done
+
+Run with in regular-sized setup:
+
+    $ for i in $(seq 1 30); do ./xdbexit.out ./dbdir 4096 4096; done
+
+## Hugepages
+
+Configuring huge pages can effectively improve RemixDB's performance.
+Usually a few hundred 2MB hugepages would be sufficient for the MemTable.
+The block cache detects and uses 1GB huge pages when available (otherwise, fall back to 2MB pages and then 4KB pages).
+4x 1GB huge pages should be configured if you set cache size to 4GB.
+
 ## libremixdb.so
 
 To use remixdb as a shared library, run `make libremixdb.so` and `make install`.
