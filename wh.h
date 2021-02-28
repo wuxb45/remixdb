@@ -242,6 +242,9 @@ wormhole_print_leaf_anchors(struct wormhole * const map, const char * const patt
   extern void
 wormhole_print_meta_lrmost(struct wormhole * const map, const char * const pattern);
 
+  extern void
+wormhole_print_leaf_keys(struct wormhole * const map, const char * const pattern);
+
   extern void *
 wormhole_jump_leaf_only(struct wormhole * const map, const struct kref * const key);
 #endif // WORMHOLE_DEBUG

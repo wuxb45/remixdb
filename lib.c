@@ -4514,7 +4514,6 @@ rcu_update(struct rcu * const rcu, void * const ptr)
 
 // qsbr {{{
 #define QSBR_STATES_NR ((23)) // 3*8-2 == 22; 5*8-2 == 38; 7*8-2 == 54
-#define QSBR_BITMAP_FULL ((1lu << QSBR_STATES_NR) - 1)
 #define QSBR_SHARD_BITS  ((5)) // bits <= 6
 #define QSBR_SHARD_NR    (((1u) << QSBR_SHARD_BITS))
 #define QSBR_SHARD_MASK  ((QSBR_SHARD_NR - 1))
@@ -4575,12 +4574,11 @@ qsbr_register(struct qsbr * const q, struct qsbr_ref * const qref)
 
   do {
     u64 bits = atomic_load_explicit(&shard->bitmap, MO_CONSUME);
-    if (unlikely(bits == QSBR_BITMAP_FULL))
+    const u32 pos = (u32)__builtin_ctzl(~bits);
+    if (unlikely(pos >= QSBR_STATES_NR))
       return false;
 
-    const u32 pos = (u32)__builtin_ctzl(~bits);
     const u64 bits1 = bits | (1lu << pos);
-    debug_assert(pos < QSBR_STATES_NR);
     if (atomic_compare_exchange_weak_explicit(&shard->bitmap, &bits, bits1, MO_ACQUIRE, MO_RELAXED)) {
       shard->ptrs[pos] = ref;
 
@@ -4605,8 +4603,9 @@ qsbr_unregister(struct qsbr * const q, struct qsbr_ref * const qref)
   const u32 pos = (u32)(ref->pptr - shard->ptrs);
   debug_assert(pos < QSBR_STATES_NR);
   debug_assert(shard->bitmap & (1lu << pos));
+
   shard->ptrs[pos] = &q->target;
-  atomic_fetch_and_explicit(&shard->bitmap, ~(1lu << pos), MO_RELEASE);
+  (void)atomic_fetch_and_explicit(&shard->bitmap, ~(1lu << pos), MO_RELEASE);
 #ifdef QSBR_DEBUG
   ref->tid = 0;
   ref->ptid = 0;
@@ -4614,6 +4613,9 @@ qsbr_unregister(struct qsbr * const q, struct qsbr_ref * const qref)
   ref->nbt = 0;
 #endif
   ref->pptr = NULL;
+  // wait for qsbr_wait to leave if it's working on the shard
+  while (atomic_load_explicit(&shard->bitmap, MO_CONSUME) >> 63)
+    cpu_pause();
 }
 
   inline void
@@ -4653,7 +4655,7 @@ qsbr_wait(struct qsbr * const q, const u64 target)
 {
   cpu_cfence();
   qsbr_write_qstate(&q->target, target);
-  u64 cbits = 0; // check-bits
+  u64 cbits = 0; // check-bits; each bit corresponds to a shard
   u64 bms[QSBR_SHARD_NR]; // copy of all bitmap
   // take an unsafe snapshot of active users
   for (u32 i = 0; i < QSBR_SHARD_NR; i++) {
@@ -4664,15 +4666,17 @@ qsbr_wait(struct qsbr * const q, const u64 target)
 
   while (cbits) {
     for (u64 ctmp = cbits; ctmp; ctmp &= (ctmp - 1)) {
+      // shard id
       const u32 i = (u32)__builtin_ctzl(ctmp);
       struct qshard * const shard = &(q->shards[i]);
-      const u64 bits1 = atomic_load_explicit(&(shard->bitmap), MO_CONSUME);
+      const u64 bits1 = atomic_fetch_or_explicit(&(shard->bitmap), 1lu << 63, MO_ACQUIRE);
       for (u64 bits = bms[i]; bits; bits &= (bits - 1)) {
         const u64 bit = bits & -bits; // extract lowest bit
         if (((bits1 & bit) == 0) ||
             (atomic_load_explicit(&(shard->ptrs[__builtin_ctzl(bit)]->qstate), MO_CONSUME) == target))
           bms[i] &= ~bit;
       }
+      (void)atomic_fetch_and_explicit(&(shard->bitmap), ~(1lu << 63), MO_RELEASE);
       if (bms[i] == 0)
         cbits &= ~(1lu << i);
     }

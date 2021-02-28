@@ -525,6 +525,7 @@ xdb_do_comp(struct xdb * const xdb, const u64 max_rejsz)
 
   // after qsbr_wait
   imt_api->clean(imt_map);
+  const double t_clean = time_sec();
 
   xdb_lock(xdb);
   wal_io_complete(&xdb->wal); // wait for the sync to complete
@@ -534,7 +535,7 @@ xdb_do_comp(struct xdb * const xdb, const u64 max_rejsz)
   msstz_log(xdb->z, "%s discard wal fd %d sz0 %lu\n", __func__, xdb->wal.fds[1], walsz0);
   ftruncate(xdb->wal.fds[1], 0);
   fdatasync(xdb->wal.fds[1]);
-  const double t_clean = time_sec();
+  const double t_sync = time_sec();
 
   // I/O stats
   const size_t usr_write = xdb->wal.write_user;
@@ -548,8 +549,8 @@ xdb_do_comp(struct xdb * const xdb, const u64 max_rejsz)
   const u64 mb = 1lu<<20;
   msstz_log(xdb->z, "%s mtsz %lu walsz %lu write-mb usr %lu wal %lu sst %lu WA %.4lf comp-read-mb %lu RA %.4lf\n",
       __func__, mtsz0, walsz0, usr_write/mb, wal_write/mb, sst_write/mb, sys_wa, sst_read/mb, comp_ra);
-  msstz_log(xdb->z, "%s times-ms total %.3lf prep %.3lf comp %.3lf reinsert %.3lf wait2 %.3lf clean %.3lf\n",
-      __func__, t_clean-t0, t_prep-t0, t_comp-t_prep, t_reinsert-t_comp, t_wait2-t_reinsert, t_clean-t_wait2);
+  msstz_log(xdb->z, "%s times-ms total %.3lf prep %.3lf comp %.3lf reinsert %.3lf wait2 %.3lf clean %.3lf sync %.3lf\n",
+      __func__, t_clean-t0, t_prep-t0, t_comp-t_prep, t_reinsert-t_comp, t_wait2-t_reinsert, t_clean-t_wait2, t_sync-t_clean);
 }
 
   static void *

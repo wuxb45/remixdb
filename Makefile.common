@@ -177,7 +177,7 @@ endif
 
 
 %.dis : %.out
-	objdump -SlwTC $< 1> $@ 2>/dev/null
+	objdump -SlwtC $< 1>$@ 2>/dev/null
 
 %.o : %.cc $(DEP) $$(DEP-$$@) $$(addsuffix .h,$$(HDR-$$@) $$(MOD-$$@))
 	$(XCC) $(XSTD) $(EXTRA) $(FLG) $(FLG-$*) $(FLG-$@) -o $@ -c $<
