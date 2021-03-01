@@ -65,6 +65,7 @@ To compile and run the demo code:
 
 ## Configuration
 
+### CPU affinity
 RemixDB employs background threads to perform asynchronous compaction.
 When possible (on Linux or FreeBSD), these threads are pinned on specific cores for efficiency.
 To avoid having conflicts with the foreground threads, it is necessary to separate the cores used by different threads.
@@ -81,6 +82,11 @@ A preferred setup for the machine mentioned above would be like this:
 $ export XDB_CPU_LIST=12,14,16,18
 $ ./xdbdemo.out
 ```
+
+### Maximum number of open files
+The current implementation keeps every table file open at run time.
+This requires a large `nofile` in `/etc/security/limits.conf`.
+For example, add `* - nofile 100000` to `limits.conf`, reboot/relogin, and check `ulimit -n`.
 
 ## xdbtest
 
