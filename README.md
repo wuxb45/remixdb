@@ -39,6 +39,42 @@ A store created by one of these functions can be safely opened by the other func
 This roughly corresponds to the 64KB block size limit.
 TODO: store huge KV pairs in a separate file and store the file address of the KV pair in RemixDB.
 
+# Configuration and Tuning
+
+## CPU affinity
+RemixDB employs background threads to perform asynchronous compaction.
+When possible (on Linux or FreeBSD), these threads are pinned on specific cores for efficiency.
+To avoid interferences with the foreground threads, it is necessary to separate the cores used by different threads.
+By default, RemixDB pins 4 compaction threads on the last four cores of the current process's affinity list.
+For example, on a machine with two 10-core processors, cores 0,2,4,...,16,18 belong to numa node 0,
+and the rest cores belong to numa node 1.
+The default behavior is to use the cores from 16 to 19, which is a suboptimal setup.
+To avoid the performance penalty, one should set environment variable `XDB_CPU_LIST=core1,core2,...`
+to specify the cores used by the background threads.
+There can be up to four compaction threads. The default number is four.
+A preferred setup for the machine mentioned above would be like this:
+
+```
+$ export XDB_CPU_LIST=12,14,16,18
+$ numactl -C 0,2,4,6 ./xdbdemo.out
+```
+
+## Maximum number of open files
+The current implementation keeps every table file open at run time.
+This requires a large `nofile` in `/etc/security/limits.conf`.
+For example, add `* - nofile 100000` to `limits.conf`, reboot/relogin, and double-check with `ulimit -n`.
+
+## Maximum Table File Size
+`MSSTZ_NBLKS` (sst.c) controls the maximum number of 4KB blocks in an SST file.  The default number is 20400.
+The maximum value is 65520 (256MB data blocks, plus metadata).
+
+## Hugepages
+
+Configuring huge pages can effectively improve RemixDB's performance.
+Usually a few hundred 2MB hugepages would be sufficient for memory allocation in MemTables.
+The block cache automatically detects and uses 1GB huge pages when available (otherwise, fall back to 2MB pages, and then 4KB pages).
+4x 1GB huge pages should be configured if you set cache size to 4GB.
+
 # Getting Started
 
 RemixDB by default uses `liburing` (`io_uring`) and thus requires a Linux kernel >= 5.1.
@@ -62,31 +98,6 @@ To compile and run the demo code:
 
     $ make M=j xdbdemo.out
     $ ./xdbdemo.out
-
-## Configuration
-
-### CPU affinity
-RemixDB employs background threads to perform asynchronous compaction.
-When possible (on Linux or FreeBSD), these threads are pinned on specific cores for efficiency.
-To avoid having conflicts with the foreground threads, it is necessary to separate the cores used by different threads.
-By default, RemixDB pins 4 compaction threads on the last four cores of the current process's affinity list.
-For example, on a machine with two 10-core processors, cores 0,2,4,...,16,18 belong to numa node 0,
-and the rest cores belong to numa node 1.
-The default behavior is to use the cores from 16 to 19, which is a suboptimal setup.
-To avoid the performance penalty, one should set environment variable `XDB_CPU_LIST=core1,core2,...`
-to specify the cores used by the background threads.
-The number of cores can be from 1 to 8.
-A preferred setup for the machine mentioned above would be like this:
-
-```
-$ export XDB_CPU_LIST=12,14,16,18
-$ ./xdbdemo.out
-```
-
-### Maximum number of open files
-The current implementation keeps every table file open at run time.
-This requires a large `nofile` in `/etc/security/limits.conf`.
-For example, add `* - nofile 100000` to `limits.conf`, reboot/relogin, and check `ulimit -n`.
 
 ## xdbtest
 
@@ -125,13 +136,6 @@ Run with a small footprint:
 Run with in regular-sized setup:
 
     $ for i in $(seq 1 30); do ./xdbexit.out ./dbdir 4096 4096; done
-
-## Hugepages
-
-Configuring huge pages can effectively improve RemixDB's performance.
-Usually a few hundred 2MB hugepages would be sufficient for the MemTable.
-The block cache detects and uses 1GB huge pages when available (otherwise, fall back to 2MB pages and then 4KB pages).
-4x 1GB huge pages should be configured if you set cache size to 4GB.
 
 ## libremixdb.so
 
