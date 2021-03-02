@@ -484,6 +484,7 @@ struct entry13 { // what a beautiful name
       u64 e3:48;
     };
     u64 v64;
+    void * ptr;
   };
 };
 

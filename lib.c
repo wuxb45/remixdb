@@ -236,7 +236,7 @@ crc32c_inc_x4(const u8 * buf, u32 nr, u32 crc)
 #pragma nounroll
   while (nr >= sizeof(u64)) {
     crc = crc32c_u64(crc, *((u64*)buf));
-    nr -= sizeof(u64);
+    nr -= (u32)sizeof(u64);
     buf += sizeof(u64);
   }
   if (nr)
@@ -250,12 +250,12 @@ crc32c_inc(const u8 * buf, u32 nr, u32 crc)
 #pragma nounroll
   while (nr >= sizeof(u64)) {
     crc = crc32c_u64(crc, *((u64*)buf));
-    nr -= sizeof(u64);
+    nr -= (u32)sizeof(u64);
     buf += sizeof(u64);
   }
   if (nr >= sizeof(u32)) {
     crc = crc32c_u32(crc, *((u32*)buf));
-    nr -= sizeof(u32);
+    nr -= (u32)sizeof(u32);
     buf += sizeof(u32);
   }
   return nr ? crc32c_inc_123(buf, nr, crc) : crc;
@@ -305,7 +305,8 @@ static char debug_filepath[1024] = {};
 debug_bt_error_cb(void * const data, const char * const msg, const int errnum)
 {
   (void)data;
-  dprintf(2, "libbacktrace: %s %s\n", msg, strerror(errnum));
+  if (msg)
+    dprintf(2, "libbacktrace: %s %s\n", msg, strerror(errnum));
 }
 
   static int
@@ -317,10 +318,10 @@ debug_bt_print_cb(void * const data, const uintptr_t pc,
     dprintf(2, "[%u]0x%012lx " TERMCLR(35) "%s" TERMCLR(31) ":" TERMCLR(34) "%d" TERMCLR(0)" %s\n",
         *plevel, pc, file ? file : "???", lineno, func ? func : "???");
   } else if (pc) {
-    dprintf(2, "[%u]0x%012lx\n", *plevel, pc);
+    dprintf(2, "[%u]0x%012lx ??\n", *plevel, pc);
   }
   (*plevel)++;
-  return strcmp(func, "main") == 0;
+  return 0;
 }
 
 __attribute__((constructor))
@@ -834,7 +835,7 @@ process_getaffinity_list(const u32 max, u32 * const cores)
   const u32 nr = nr_affinity < max ? nr_affinity : max;
   u32 j = 0;
   for (u32 i = 0; i < process_ncpu; i++) {
-    if (CPU_ISSET((int)i, &set))
+    if (CPU_ISSET(i, &set))
       cores[j++] = i;
 
     if (j >= nr)
@@ -890,17 +891,6 @@ struct fork_join_info {
 // DON'T CHANGE!
 #define FORK_JOIN_RANK_BITS ((16)) // 16
 #define FORK_JOIN_MAX ((1u << FORK_JOIN_RANK_BITS))
-#define FORK_JOIN_FJI_BITS ((64 - FORK_JOIN_RANK_BITS)) // 48
-struct fork_join_priv {
-  union {
-    struct {
-      u64 rank : FORK_JOIN_RANK_BITS; // 16
-      u64 fji : FORK_JOIN_FJI_BITS; // 48
-    };
-    void * ptr;
-  };
-};
-static_assert(sizeof(struct fork_join_priv) == sizeof(void *), "fork_join_priv");
 
 /*
  * fj(6):     T0
@@ -916,12 +906,12 @@ static_assert(sizeof(struct fork_join_priv) == sizeof(void *), "fork_join_priv")
   static void *
 thread_do_fork_join_worker(void * const ptr)
 {
-  struct fork_join_priv fjp = {.ptr = ptr};
+  struct entry13 fjp = {.ptr = ptr};
   // GCC: Without explicitly casting from fjp.fji (a 45-bit u64 value),
   // the high bits will get truncated, which is always CORRECT in gcc.
   // Don't use gcc.
-  struct fork_join_info * const fji = (typeof(fji))((u64)(fjp.fji));
-  const u32 rank = fjp.rank;
+  struct fork_join_info * const fji = u64_to_ptr(fjp.e3);
+  const u32 rank = (u32)fjp.e1;
 
   const u32 nchild = (u32)__builtin_ctz(rank ? rank : bits_p2_up_u32(fji->total));
   debug_assert(nchild <= FORK_JOIN_RANK_BITS);
@@ -940,7 +930,7 @@ thread_do_fork_join_worker(void * const ptr)
       const u32 core = fji->cores[(cr < fji->ncores) ? cr : (cr % fji->ncores)];
       CPU_SET(core, &set);
       pthread_attr_setaffinity_np(&attr, sizeof(set), &set);
-      fjp.rank = cr;
+      fjp.e1 = (u16)cr;
       const int r = pthread_create(&tids[i], &attr, thread_do_fork_join_worker, fjp.ptr);
       CPU_CLR(core, &set);
       if (unlikely(r)) { // fork failed
@@ -1007,7 +997,7 @@ thread_fork_join(u32 nr, void *(*func) (void *), const bool args, void * const a
   fji.arg1 = argx;
   fji.ferr = 0;
   fji.jerr = 0;
-  struct fork_join_priv fjp = {.fji = (u64)(&fji), .rank = 0};
+  const struct entry13 fjp = entry13(0, (u64)(&fji));
 
   // save current affinity
   cpu_set_t set0;
@@ -2117,7 +2107,7 @@ fdsize(const int fd)
 #endif // OS
   }
 
-  return st.st_size;
+  return (size_t)st.st_size;
 }
 
   u32
@@ -2263,7 +2253,7 @@ bitmap_first(struct bitmap * const bm)
 {
   for (u64 i = 0; (i << 6) < bm->nbits; i++) {
     if (bm->bm[i])
-      return (i << 6) + __builtin_ctzl(bm->bm[i]);
+      return (i << 6) + (u32)__builtin_ctzl(bm->bm[i]);
   }
   debug_die();
 }
@@ -4251,7 +4241,7 @@ rgen_async_wait_all(struct rgen * const gen)
 {
   if (gen->type == GEN_ASYNC) {
     for (u32 i = 0; i < 4; i++)
-      rgen_async_wait_at(gen, i);
+      rgen_async_wait_at(gen, (u8)i);
   }
 }
 
@@ -4260,7 +4250,7 @@ rgen_async_switch(struct rgen * const gen)
 {
   struct rgen_async * const as = &(gen->async);
   as->avail[as->reader_id] = false;
-  as->reader_id = (as->reader_id + 1) % RGEN_ABUF_NR;
+  as->reader_id = (as->reader_id + 1u) % RGEN_ABUF_NR;
   as->curr = as->mem + (as->reader_id * RGEN_ABUF_SZ1);
   as->guard = as->curr + RGEN_ABUF_SZ1;
 }
