@@ -1380,9 +1380,6 @@ miter_clean(struct miter * const miter)
     const struct kvmap_api * const api = stream->api;
     api->iter_destroy(stream->iter);
     kvmap_unref(api, stream->ref);
-    // don't clear memory
-    //memset(stream, 0, sizeof(*stream));
-    //free(stream);
   }
   miter->nway = 0;
 }

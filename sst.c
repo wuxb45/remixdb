@@ -43,7 +43,6 @@ static_assert(SSTY_DBITS >= 4 && SSTY_DBITS <= 5, "Supported SSTY_DBITS: 4 and 5
 // turn on IO-optimized binary search by default
 #define MSSTY_SEEK_BISECT_OPT
 
-#define MSSTZ_DIST ((32))
 #define MSSTZ_NBLKS ((20400)) // slightly smaller than 20480
 // approx. table size must be smaller
 #define MSSTZ_TSZ ((MSSTZ_NBLKS * PGSZ))
@@ -1177,20 +1176,19 @@ msstx_open_at_reuse(const int dfd, const u64 seq, const u32 nway, struct msst * 
   }
 
   for (u32 i = nway0; i < nway; i++) {
-    if (!sst_init_at(dfd, seq, i, &(msst->ssts[i])))
-      goto fail_sst;
+    if (!sst_init_at(dfd, seq, i, &(msst->ssts[i]))) {
+      // error
+      for (u64 j = 0; j < i; j++)
+        sst_deinit(&(msst->ssts[j]));
+
+      free(msst);
+      return NULL;
+    }
   }
   msst->seq = seq;
   msst->nway = nway;
   return msst;
 
-fail_sst:
-  for (u64 i = 0; i < nway; i++)
-    if (msst->ssts[i].mem)
-      sst_deinit(&(msst->ssts[i]));
-
-  free(msst);
-  return NULL;
 }
 
   static struct msst *
@@ -1493,15 +1491,18 @@ ssty_open_at(const int dfd, const u64 seq, const u32 nway)
     return NULL;
   struct stat st;
 
-  if (fstat(fd, &st))
-    goto fail;
+  if (fstat(fd, &st) != 0) {
+    close(fd);
+    return NULL;
+  }
 
   const u64 fsize = (u64)st.st_size;
   debug_assert(fsize < UINT32_MAX);
   u8 * const mem = mmap(NULL, fsize, PROT_READ, SSTY_MMAP_FLAGS, fd, 0);
+  close(fd); // will only use the mapped memory
   if (mem == MAP_FAILED)
-    goto fail;
-  close(fd);
+    return NULL;
+
   struct ssty * const ssty = calloc(1, sizeof(*ssty));
 
   ssty->mem = mem;
@@ -1518,9 +1519,6 @@ ssty_open_at(const int dfd, const u64 seq, const u32 nway)
   ssty->meta = meta;
   debug_assert(ssty->meta->magic == magic);
   return ssty;
-fail:
-  close(fd);
-  return NULL;
 }
 
   struct ssty *
@@ -4503,7 +4501,7 @@ msstz_comp_harvest(struct msstz_comp_info * const ci)
   static u64
 msstz_comp_estimate_ssty(const u64 nkeys, const float way)
 {
-  const u64 nsecs = nkeys / MSSTZ_DIST;
+  const u64 nsecs = nkeys / SSTY_DIST;
   return (sizeof(struct sst_ptr) * (u64)ceilf(way) + 16) * nsecs + nkeys;
 }
 

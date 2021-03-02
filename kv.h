@@ -438,19 +438,6 @@ kvmap_api_helper(int argc, char ** const argv,
 // }}} kvmap_api
 
 // helpers {{{
-struct entry13 {
-  union {
-    u16 e1; // TODO: position of e1 is undefined
-    struct {
-      u64 e1_64:16;
-      u64 e3:48;
-    };
-    u64 v64;
-  };
-};
-
-static_assert(sizeof(struct entry13) == 8, "sizeof(entry13) != 8");
-
   extern void
 kvmap_inp_steal_kv(struct kv * const kv, void * const priv);
 
@@ -527,6 +514,24 @@ kvmap_dump_keys(const struct kvmap_api * const api, void * const map, const int 
 // }}} kvmap
 
 // miter {{{
+// general-purpose merging iterator
+// api functions:
+// REQUIRED:
+//   - iter_create
+//   - iter_seek
+//   - iter_peek
+//   - iter_skip
+//   - iter_destroy
+//   - iter_kref
+//   - iter_kvref
+// OPTIONAL (api-specific):
+//   - ref/unref
+//   - iter_park
+//   - resume/park (need also set api->refpark)
+// OPTIONAL (performance):
+//   - api->unique (faster miter_skip_unique)
+//   - iter_release/iter_release (less memcpy)
+
 struct miter;
 
   extern struct miter *

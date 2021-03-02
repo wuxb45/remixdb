@@ -102,7 +102,7 @@ time_diff_sec(const double last)
 }
 
 // need char str[64]
-  inline void
+  void
 time_stamp(char * str, const size_t size)
 {
   time_t now;
@@ -112,7 +112,7 @@ time_stamp(char * str, const size_t size)
   strftime(str, size, "%F %T %z", &nowtm);
 }
 
-  inline void
+  void
 time_stamp2(char * str, const size_t size)
 {
   time_t now;
@@ -244,7 +244,7 @@ crc32c_inc_x4(const u8 * buf, u32 nr, u32 crc)
   return crc;
 }
 
-  inline u32
+  u32
 crc32c_inc(const u8 * buf, u32 nr, u32 crc)
 {
 #pragma nounroll
@@ -381,7 +381,7 @@ debug_wait_gdb(void * const bt_state)
 }
 
 #ifndef NDEBUG
-  inline void
+  void
 debug_assert(const bool v)
 {
   if (!v)
@@ -390,7 +390,7 @@ debug_assert(const bool v)
 #endif
 
 __attribute__((noreturn))
-  inline void
+  void
 debug_die(void)
 {
   debug_wait_gdb(debug_bt_state);
@@ -398,7 +398,7 @@ debug_die(void)
 }
 
 __attribute__((noreturn))
-  inline void
+  void
 debug_die_perror(void)
 {
   perror(NULL);
@@ -550,7 +550,7 @@ realloc(void *ptr, size_t size)
 #endif // MALLOC_FAIL
 #endif // ALLOC_FAIL
 
-  inline void *
+  void *
 xalloc(const size_t align, const size_t size)
 {
 #ifdef ALLOCFAIL
@@ -558,18 +558,19 @@ xalloc(const size_t align, const size_t size)
     return NULL;
 #endif
   void * p;
-  const int r = posix_memalign(&p, align, size);
-  if (r == 0)
-    return p;
-  else
-    return NULL;
+  return (posix_memalign(&p, align, size) == 0) ? p : NULL;
 }
 
 // alloc cache-line aligned address
-  inline void *
+  void *
 yalloc(const size_t size)
 {
-  return xalloc(64, size);
+#ifdef ALLOCFAIL
+  if (alloc_fail())
+    return NULL;
+#endif
+  void * p;
+  return (posix_memalign(&p, 64, size) == 0) ? p : NULL;
 }
 
   void **
@@ -2068,6 +2069,20 @@ vi128_decode_u64(const u8 * src, u64 * const out)
 // }}} vi128
 
 // misc {{{
+  inline struct entry13
+entry13(const u16 e1, const u64 e3)
+{
+  debug_assert((e3 >> 48) == 0);
+  return (struct entry13){.v64 = (e3 << 16) | e1};
+}
+
+  inline void
+entry13_update_e3(struct entry13 * const e, const u64 e3)
+{
+  debug_assert((e3 >> 48) == 0);
+  *e = entry13(e->e1, e3);
+}
+
   inline void *
 u64_to_ptr(const u64 v)
 {
@@ -2476,6 +2491,13 @@ astk_pop_unsafe(au64 * const pmagic)
   atomic_store_explicit(pmagic, m1, MO_RELAXED);
   return (void *)ret;
 }
+
+  static void *
+astk_peek_unsafe(au64 * const pmagic)
+{
+  const u64 m0 = atomic_load_explicit(pmagic, MO_CONSUME);
+  return astk_ptr(m0);
+}
 // }}} astk
 
 // slab {{{
@@ -2485,24 +2507,28 @@ struct slab {
   u64 padding1[7];
 
   // 2nd line
-  struct acell * blk_head; // list of all blocks
-  u64 nalloc; // UNSAFE!
-  u64 nready; // UNSAFE!
+  struct acell * head_active; // list of blocks in use or in magic
+  struct acell * head_backup; // list of unused full blocks
+  u64 nr_ready; // UNSAFE only! number of objects under magic
+  u64 padding2[5];
+
+  // 3rd line const
   u64 obj_size; // const: aligned size of each object
   u64 blk_size; // const: size of each memory block
   u64 objs_per_slab; // const: number of objects in a slab
-  u64 obj0_offset; // offset of the first object in a block
-  u64 padding;
+  u64 obj0_offset; // const: offset of the first object in a block
+  u64 padding3[4];
 
-  // 3rd line
+  // 4th line
   mutex lock;
 };
 
   static void
-slab_add_block(struct slab * const slab, struct acell * const blk, const bool safe)
+slab_add(struct slab * const slab, struct acell * const blk, const bool is_safe)
 {
-  blk->next = slab->blk_head;
-  slab->blk_head = blk;
+  // insert into head_active
+  blk->next = slab->head_active;
+  slab->head_active = blk;
 
   u8 * const base = ((u8 *)blk) + slab->obj0_offset;
   struct acell * iter = (typeof(iter))base; // [0]
@@ -2511,25 +2537,33 @@ slab_add_block(struct slab * const slab, struct acell * const blk, const bool sa
     iter->next = next;
     iter = next;
   }
+
   // base points to the first block; iter points to the last block
-  if (safe) {
+  if (is_safe) { // other threads can poll magic
     astk_push_safe(&slab->magic, (struct acell *)base, iter);
   } else { // unsafe
     astk_push_unsafe(&slab->magic, (struct acell *)base, iter);
-    slab->nready += slab->objs_per_slab;
+    slab->nr_ready += slab->objs_per_slab;
   }
 }
 
+// critical section; call with lock
   static bool
-slab_expand(struct slab * const slab, const bool safe)
+slab_expand(struct slab * const slab, const bool is_safe)
 {
-  size_t blk_size;
-  struct acell * const blk = pages_alloc_best(slab->blk_size, true, &blk_size);
-  (void)blk_size;
-  if (blk == NULL)
-    return false;
+  struct acell * const old = slab->head_backup;
+  if (old) { // pop old from backup and add
+    slab->head_backup = old->next;
+    slab_add(slab, old, is_safe);
+  } else { // more core
+    size_t blk_size;
+    struct acell * const new = pages_alloc_best(slab->blk_size, true, &blk_size);
+    (void)blk_size;
+    if (new == NULL)
+      return false;
 
-  slab_add_block(slab, blk, safe);
+    slab_add(slab, new, is_safe);
+  }
   return true;
 }
 
@@ -2550,10 +2584,7 @@ slab_create(const u64 obj_size, const u64 blk_size)
   if (slab == NULL)
     return NULL;
 
-  slab->magic = 0;
-  slab->blk_head = NULL;
-  slab->nalloc = 0;
-  slab->nready = 0;
+  memset(slab, 0, sizeof(*slab));
 
   // const
   slab->obj_size = obj_size;
@@ -2570,7 +2601,7 @@ slab_create(const u64 obj_size, const u64 blk_size)
   bool
 slab_reserve_unsafe(struct slab * const slab, const u64 nr)
 {
-  while (slab->nready < nr)
+  while (slab->nr_ready < nr)
     if (!slab_expand(slab, false))
       return false;
   return true;
@@ -2586,8 +2617,7 @@ slab_alloc_unsafe(struct slab * const slab)
     ret = astk_pop_unsafe(&slab->magic);
   }
   debug_assert(ret);
-  slab->nready--;
-  slab->nalloc++;
+  slab->nr_ready--;
   return ret;
 }
 
@@ -2615,8 +2645,7 @@ slab_free_unsafe(struct slab * const slab, void * const ptr)
 {
   debug_assert(ptr);
   astk_push_unsafe(&slab->magic, ptr, ptr);
-  slab->nready++;
-  slab->nalloc--;
+  slab->nr_ready++;
 }
 
   void
@@ -2625,42 +2654,55 @@ slab_free_safe(struct slab * const slab, void * const ptr)
   astk_push_safe(&slab->magic, ptr, ptr);
 }
 
-// unsafe
+// UNSAFE
   void
 slab_free_all(struct slab * const slab)
 {
-  struct acell * iter = slab->blk_head;
   slab->magic = 0;
-  slab->blk_head = NULL;
-  slab->nalloc = 0;
-  slab->nready = 0;
-  while (iter) {
-    struct acell * const next = iter->next;
-    slab_add_block(slab, iter, false);
-    iter = next;
+  slab->nr_ready = 0; // backup does not count
+
+  if (slab->head_active) {
+    struct acell * iter = slab->head_active;
+    while (iter->next)
+      iter = iter->next;
+    // now iter points to the last blk
+    iter->next = slab->head_backup; // active..backup
+    slab->head_backup = slab->head_active; // backup gets all
+    slab->head_active = NULL; // empty active
   }
 }
 
 // unsafe
-  inline u64
+  u64
 slab_get_nalloc(struct slab * const slab)
 {
-  return slab->nalloc;
-}
+  struct acell * iter = slab->head_active;
+  u64 n = 0;
+  while (iter) {
+    n++;
+    iter = iter->next;
+  }
+  n *= slab->objs_per_slab;
 
-// unsafe
-  inline u64
-slab_get_nready(struct slab * const slab)
-{
-  return slab->nready;
+  iter = astk_peek_unsafe(&slab->magic);
+  while (iter) {
+    n--;
+    iter = iter->next;
+  }
+  return n;
 }
 
   void
 slab_destroy(struct slab * const slab)
 {
-  if (slab == NULL)
-    return;
-  struct acell * iter = slab->blk_head;
+  debug_assert(slab);
+  struct acell * iter = slab->head_active;
+  while (iter) {
+    struct acell * const next = iter->next;
+    pages_unmap(iter, slab->blk_size);
+    iter = next;
+  }
+  iter = slab->head_backup;
   while (iter) {
     struct acell * const next = iter->next;
     pages_unmap(iter, slab->blk_size);

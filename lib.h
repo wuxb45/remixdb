@@ -475,6 +475,30 @@ vi128_decode_u64(const u8 * src, u64 * const out);
 // }}} vi128
 
 // misc {{{
+// TODO: only works on little endian?
+struct entry13 { // what a beautiful name
+  union {
+    u16 e1;
+    struct { // easy for debugging
+      u64 e1_64:16;
+      u64 e3:48;
+    };
+    u64 v64;
+  };
+};
+
+static_assert(sizeof(struct entry13) == 8, "sizeof(entry13) != 8");
+
+// directly access read .e1 and .e3
+// directly write .e1
+// use entry13_update() to update the entire entry
+
+  extern struct entry13
+entry13(const u16 e1, const u64 e3);
+
+  extern void
+entry13_update_e3(struct entry13 * const e, const u64 e3);
+
   extern void *
 u64_to_ptr(const u64 v);
 
@@ -589,9 +613,6 @@ slab_free_all(struct slab * const slab);
 
   extern u64
 slab_get_nalloc(struct slab * const slab);
-
-  extern u64
-slab_get_nready(struct slab * const slab);
 
   extern void
 slab_destroy(struct slab * const slab);
