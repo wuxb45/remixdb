@@ -133,7 +133,7 @@ Run with a small footprint:
 
     $ for i in $(seq 1 30); do ./xdbexit.out ./dbdir 256 256; done
 
-Run with in regular-sized setup:
+Run with in a regular-sized setup:
 
     $ for i in $(seq 1 30); do ./xdbexit.out ./dbdir 4096 4096; done
 
