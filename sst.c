@@ -295,7 +295,7 @@ sst_search_blkid(struct sst * const map, const struct kref * const key)
 
 // access data blocks from here
   static inline const u8 *
-sst_blk_acquire(struct sst * const map, const u16 blkid)
+sst_blk_acquire(struct sst * const map, const u32 blkid)
 {
   if (map->rc && (map->bms[blkid].nblks == 1)) {
     const u8 * const ptr = rcache_acquire(map->rc, map->fd, blkid);
@@ -588,7 +588,7 @@ kvenc_write(struct kvenc * const enc, const int fd)
   }
   vec[nr].iov_base = enc->bufs[nr];
   vec[nr].iov_len = enc->off;
-  return writev(fd, vec, enc->off ? (nr + 1) : nr);
+  return writev(fd, vec, (int)(enc->off ? (nr + 1) : nr));
 }
 
   static void
@@ -706,13 +706,13 @@ sst_build_at(const int dfd, struct miter * const miter,
       // encode the metadata right before the kvbuf
       u16 * const mbuf1 = (u16 *)(kvbuf - metasz);
       for (u32 i = 0; i < keyid; i++)
-        mbuf1[i+1] = mbuf[i] + metasz;
+        mbuf1[i+1] = mbuf[i] + (u16)metasz;
 
       // write all metadata: metasz bytes
       // save in the buffer
       struct sst_blkmeta * const pblkmeta = &(bms[blkid]);
-      pblkmeta->nkeys = keyid; // 1 byte # of keys
-      pblkmeta->nblks = blknr; // 1byte # of 4kB blocks
+      pblkmeta->nkeys = (u8)keyid; // 1 byte # of keys
+      pblkmeta->nblks = (u8)blknr; // 1byte # of 4kB blocks
       mbuf1[0] = *(u16 *)pblkmeta;
       memset(kvcsr, 0, blksize - metasz - datasz); // zero-padding
 
@@ -721,7 +721,7 @@ sst_build_at(const int dfd, struct miter * const miter,
       vec->iov_len = blksize;
       vi++;
       if (vi == SST_BUILD_NVEC) {
-        writev(fdout, vecs, vi); // ignore I/O errors
+        writev(fdout, vecs, (int)vi); // ignore I/O errors
         vi = 0;
       }
       mbuf = (u16 *)(databufs + (SST_BUILD_BUFSZ * vi));
@@ -767,7 +767,7 @@ sst_build_at(const int dfd, struct miter * const miter,
   } while (true);
 
   if (vi)
-    writev(fdout, vecs, vi); // ignore I/O errors
+    writev(fdout, vecs, (int)vi); // ignore I/O errors
 
   debug_assert(inr < UINT16_MAX);
   // place bms immediately after data blocks
@@ -954,7 +954,7 @@ sst_iter_init(struct sst_iter * const iter, struct sst * const sst, const u32 ra
   debug_assert(rank < MSST_NWAY);
   iter->sst = sst;
   iter->rank = rank;
-  iter->ptr.blkid = sst->nblks;
+  iter->ptr.blkid = (u16)sst->nblks;
   iter->ptr.keyid = UINT16_MAX;
   // klen, vlen are ignored
   iter->kvdata = NULL;
@@ -1581,7 +1581,7 @@ ssty_ranks_match_mask(const u8 * const ranks, const u8 rank)
 #if SSTY_DBITS == 5
 #if defined(__AVX2__)
   const m256 maskv = _mm256_set1_epi8(SSTY_RANK);
-  const m256 rankv = _mm256_set1_epi8(rank);
+  const m256 rankv = _mm256_set1_epi8((char)rank);
   const m256 tmpv = _mm256_and_si256(_mm256_load_si256((const void *)ranks), maskv);
   return (u32)_mm256_movemask_epi8(_mm256_cmpeq_epi8(tmpv, rankv));
 #else // No __AVX2__, use SSE 4.2
@@ -1943,7 +1943,7 @@ mssty_iter_skip1(struct mssty_iter * const iter)
   debug_assert(mssty_iter_valid(iter));
   struct ssty * const ssty = iter->ssty;
   const u8 * const ranks = ssty->ranks;
-  u32 rank = ranks[iter->kidx] & SSTY_RANK;
+  u8 rank = ranks[iter->kidx] & SSTY_RANK;
 
   mssty_iter_skip1_rank(iter, rank);
   iter->kidx++;
@@ -1993,7 +1993,7 @@ mssty_iter_seek_bisect(struct mssty_iter * const iter, const struct kref * const
     u32 mask = ssty_ranks_match_mask(ranks, rankx) & (((u32)(1lu << r)) - 1u);
     debug_assert(l < SSTY_DIST);
     const u32 low = (1u << l) - 1u;
-    const u32 nskip0 = __builtin_popcount(mask & low);
+    const u32 nskip0 = (u32)__builtin_popcount(mask & low);
     if (nskip0)
       sst_iter_skip(iterx, nskip0);
     mask &= (~low); // clear the low bits
@@ -2001,7 +2001,7 @@ mssty_iter_seek_bisect(struct mssty_iter * const iter, const struct kref * const
     do {
       sst_iter_fix_kv(iterx);
       const int cmp = sst_iter_compare_kref(iterx, key);
-      const u32 m = __builtin_ctz(mask);
+      const u32 m = (u32)__builtin_ctz(mask);
       debug_assert((ranks[m] & SSTY_RANK) == rankx);
       debug_assert(m < r);
       if (cmp < 0) { // shrink forward
@@ -2085,7 +2085,7 @@ mssty_iter_seek_local(struct mssty_iter * const iter, const struct kref * const 
   if (goff) {
     if (goff < SSTY_DIST) {
       const u8 * const ranks = ssty->ranks + aidx;
-      for (u32 i = 0; i < ssty->nway; i++) {
+      for (u8 i = 0; i < ssty->nway; i++) {
         const u32 nskip = ssty_ranks_count(ranks, goff, i);
         if (nskip) {
           mssty_iter_fix_rank(iter, i);
@@ -2269,7 +2269,7 @@ mssty_iter_skip(struct mssty_iter * const iter, const u32 nr)
     return;
   struct ssty * const ssty = iter->ssty;
   const u8 * const ranks = ssty->ranks;
-  u32 rank = ranks[iter->kidx] & SSTY_RANK;
+  u8 rank = ranks[iter->kidx] & SSTY_RANK;
   debug_assert(rank < ssty->nway);
 
   for (u32 i = 0; i < nr; i++) {
@@ -2366,7 +2366,7 @@ mssty_iter_skip_dup(struct mssty_iter * const iter, const u32 nr)
     return;
   struct ssty * const ssty = iter->ssty;
   const u8 * const ranks = ssty->ranks;
-  u32 rank = ranks[iter->kidx] & SSTY_RANK;
+  u8 rank = ranks[iter->kidx] & SSTY_RANK;
   debug_assert(rank < ssty->nway);
 
   for (u32 i = 0; i < nr; i++) {
@@ -2447,7 +2447,7 @@ mssty_last(struct msst * const msst, struct kv * const out)
   while (sst->bms[blkid].nblks == 0)
     blkid--;
   debug_assert((blkid + sst->bms[blkid].nblks) == sst->nblks);
-  iter1.ptr.blkid = blkid;
+  iter1.ptr.blkid = (u16)blkid;
   iter1.ptr.keyid = sst->bms[blkid].nkeys-1;
   iter1.kvdata = NULL; // init to NULL
   struct kv * const ret = sst_iter_peek(&iter1, out);
@@ -3023,7 +3023,7 @@ msstb2_create(struct msst * const msstx1, struct msst * const mssty0, const u32 
     mssty_iter_seek_null(&(b->iterb));
     mssty_iter_init(&(b->iter0), mssty0);
     mssty_iter_seek_null(&(b->iter0));
-    for (u32 i = 0; i < way0; i++)
+    for (u8 i = 0; i < way0; i++)
       mssty_iter_fix_rank(&(b->iter0), i);
 
     // skip the first a few stale keys
@@ -3682,13 +3682,6 @@ msstv_search_le(struct msstv * const v, const struct kref * const key)
       return m;
   }
   return l;
-}
-
-  struct kv *
-msstv_last(struct msstv * const v, struct kv * const out)
-{
-  struct msst * const plast = v->es[v->nr-1].msst;
-  return mssty_last(plast, out);
 }
 
   struct kv *
@@ -4720,7 +4713,7 @@ msstz_comp_analyze(struct msstz_comp_info * const ci, const u64 ipart)
   if (f[nway].nway1 > (float)MSSTZ_NWAY_MINOR)
     f[0].bonus += (f[0].nway1 - (float)MSSTZ_NWAY_MAJOR); // large bonus when split is necessary
   // adjust minor bonus
-  f[nway].bonus += 1.0; // +1
+  f[nway].bonus += 1.0f; // +1
 
   u32 bestway = 0; // major by default
   for (u32 i = 0; i <= nway; i++) {
@@ -4892,7 +4885,7 @@ msstz_comp_worker_coq_co(void)
 msstz_comp_worker(void * const ptr)
 {
   struct msstz_comp_info * const ci = (typeof(ci))ptr;
-  const u64 nco = ci->co_per_worker;
+  const u32 nco = ci->co_per_worker;
   if (nco > 1) {
     struct coq * const coq = rcache_coq_create(nco << 2);
     coq_install(coq);

@@ -20,8 +20,8 @@
 struct wring {
   void * mem;
   void * head;
-  size_t iosz;
   size_t memsz;
+  u32 iosz;
   int fd;
 #if defined(LIBURING)
   u32 batch; // submit when pending >= batch
@@ -29,12 +29,13 @@ struct wring {
   u32 pending; // number of unsubmitted sqes
   bool fixed_file; // use this fd for write (0 for registered file)
   bool fixed_mem; // use write_fixed()
-  bool padding[6];
+  bool padding[2];
   struct io_uring uring;
 #else
   u32 off_mask;
   u32 off_submit;
   u32 off_finish; // nothing to finish if == submit
+  u32 reserved;
   struct {
     struct aiocb aiocb;
     void * data;
@@ -43,7 +44,7 @@ struct wring {
 };
 
   struct wring *
-wring_create(const int fd, const size_t iosz, const u32 depth0)
+wring_create(const int fd, const u32 iosz, const u32 depth0)
 {
   debug_assert(depth0);
 #if defined(LIBURING)
@@ -53,10 +54,11 @@ wring_create(const int fd, const size_t iosz, const u32 depth0)
   const u32 depth = depth0 < 8 ? bits_p2_up_u32(depth0) : 8;
   struct wring * const wring = calloc(1, sizeof(*wring) + (sizeof(wring->aring[0]) * depth));
 #endif // LIBURING
+  const u64 iosz_64 = iosz; // memsz can be larger
 
   if (!wring)
     return NULL;
-  const size_t memsz = bits_round_up(iosz * depth, 21); // a multiple of 2MB
+  const size_t memsz = bits_round_up(iosz_64 * depth, 21); // a multiple of 2MB
   // 2MB buffer (initialized to zero by mmap)
   u8 * const mem = pages_alloc_best(memsz, false, &wring->memsz);
   if (!mem) {
@@ -65,7 +67,7 @@ wring_create(const int fd, const size_t iosz, const u32 depth0)
   }
   // link all
   for (u64 i = 0; i < depth-1; i++)
-    *(u64 *)(mem + (iosz * i)) = (u64)(mem + (iosz * (i+1)));
+    *(u64 *)(mem + (iosz_64 * i)) = (u64)(mem + (iosz_64 * (i+1)));
   wring->mem = mem;
   wring->head = mem;
   wring->iosz = iosz;
@@ -212,8 +214,8 @@ wring_wait_slot(struct wring * const wring)
 
 // write a 4kB page
   void
-wring_write_partial(struct wring * const wring, const size_t off,
-    void * const buf, const size_t buf_off, const size_t size)
+wring_write_partial(struct wring * const wring, const off_t off,
+    void * const buf, const size_t buf_off, const u32 size)
 {
   debug_assert((buf_off + size) <= wring->iosz);
   u8 * const wbuf = ((u8 *)buf) + buf_off;
@@ -255,7 +257,7 @@ wring_write_partial(struct wring * const wring, const size_t off,
 }
 
   inline void
-wring_write(struct wring * const wring, const size_t off, void * const buf)
+wring_write(struct wring * const wring, const off_t off, void * const buf)
 {
   wring_write_partial(wring, off, buf, 0, wring->iosz);
 }
@@ -574,17 +576,15 @@ cowq_process_aio(void * const priv)
   return true;
 }
 
-  static void
+  static ssize_t
 coq_wait_aio(struct coq * const q, struct aiocb * const cb, struct co * const self)
 {
   do {
     cowq_enqueue(q, cowq_process_aio, (void *)self);
     co_back(0);
     const int r = aio_error(cb);
-    if (r == 0)
-      return;
-    else if (r != EINPROGRESS)
-      debug_die_perror();
+    if (r != EINPROGRESS)
+      return aio_return(cb);
   } while (true);
 }
 
@@ -597,11 +597,10 @@ coq_pread_aio(struct coq * const q, const int fd, void * const buf, const size_t
 
   struct aiocb cb = { .aio_fildes = fd, .aio_buf = buf, .aio_nbytes = count, .aio_offset = offset};
   const int r = aio_read(&cb);
-  if (r != 0)
-    debug_die_perror();
+  if (unlikely(r))
+    return -1;
 
-  coq_wait_aio(q, &cb, self);
-  return count;
+  return coq_wait_aio(q, &cb, self);
 }
 
   ssize_t
@@ -613,11 +612,10 @@ coq_pwrite_aio(struct coq * const q, const int fd, const void * const buf, const
 
   struct aiocb cb = { .aio_fildes = fd, .aio_buf = (void *)buf, .aio_nbytes = count, .aio_offset = offset};
   const int r = aio_write(&cb);
-  if (r != 0)
-    debug_die_perror();
+  if (unlikely(r))
+    return -1;
 
-  coq_wait_aio(q, &cb, self);
-  return count;
+  return coq_wait_aio(q, &cb, self);
 }
 // }}} aio
 

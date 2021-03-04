@@ -884,8 +884,10 @@ struct fork_join_info {
     void * arg1;
     void ** argn;
   };
-  au64 ferr;
-  au64 jerr;
+  union {
+    struct { volatile au32 ferr, jerr; };
+    volatile au64 xerr;
+  };
 };
 
 // DON'T CHANGE!
@@ -938,7 +940,7 @@ thread_do_fork_join_worker(void * const ptr)
         u32 nmiss = (1u << (i + 1)) - 1;
         if ((rank + nmiss) >= fji->total)
           nmiss = fji->total - 1 - rank;
-        fji->ferr += nmiss;
+        (void)atomic_fetch_add_explicit(&fji->ferr, nmiss, MO_RELAXED);
         break;
       }
     }
@@ -963,7 +965,7 @@ thread_do_fork_join_worker(void * const ptr)
       const int r = pthread_join(tids[i], NULL);
       if (unlikely(r)) { // error
         //fprintf(stderr, "pthread_join %u..%u = %d: %s\n", rank, cr, r, strerror(r));
-        fji->jerr++;
+        (void)atomic_fetch_add_explicit(&fji->jerr, 1, MO_RELAXED);
       }
     }
   }
@@ -985,18 +987,12 @@ thread_fork_join(u32 nr, void *(*func) (void *), const bool args, void * const a
     for (u32 i = 0; i < process_ncpu; i++)
       cores[i] = i;
   }
-  if (nr == 0)
+  if (unlikely(nr == 0))
     nr = ncores;
 
-  volatile struct fork_join_info fji;
-  fji.total = nr;
-  fji.cores = cores;
-  fji.ncores = ncores;
-  fji.func = func;
-  fji.args = args;
-  fji.arg1 = argx;
-  fji.ferr = 0;
-  fji.jerr = 0;
+  // the compiler does not know fji can change since we cast &fji into fjp
+  struct fork_join_info fji = {.total = nr, .cores = cores, .ncores = ncores,
+      .func = func, .args = args, .arg1 = argx};
   const struct entry13 fjp = entry13(0, (u64)(&fji));
 
   // save current affinity
@@ -1010,20 +1006,23 @@ thread_fork_join(u32 nr, void *(*func) (void *), const bool args, void * const a
   thread_setaffinity_set(&set);
 
   const u64 t0 = time_nsec();
-  thread_do_fork_join_worker(fjp.ptr);
+  (void)thread_do_fork_join_worker(fjp.ptr);
   const u64 dt = time_diff_nsec(t0);
 
   // restore original affinity
   thread_setaffinity_set(&set0);
-  if (fji.ferr || fji.jerr)
-    fprintf(stderr, "%s errors: fork %lu join %lu\n", __func__, fji.ferr, fji.jerr);
+
+  // check and report errors (unlikely)
+  if (atomic_load_explicit(&fji.xerr, MO_CONSUME))
+    fprintf(stderr, "%s errors: fork %u join %u\n", __func__, fji.ferr, fji.jerr);
   return dt;
 }
 
   int
-thread_create_at(const u32 cpu, pthread_t * const thread, void *(*start_routine) (void *), void * const arg)
+thread_create_at(const u32 cpu, pthread_t * const thread,
+    void *(*start_routine) (void *), void * const arg)
 {
-  const u32 cpu_id = cpu % process_ncpu;
+  const u32 cpu_id = (cpu < process_ncpu) ? cpu : (cpu % process_ncpu);
   pthread_attr_t attr;
   pthread_attr_init(&attr);
   //pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_JOINABLE);

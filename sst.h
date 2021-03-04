@@ -61,6 +61,12 @@ sst_get(struct sst * const map, const struct kref * const key, struct kv * const
   extern bool
 sst_probe(struct sst* const map, const struct kref * const key);
 
+  extern struct kv *
+sst_first_key(struct sst * const map, struct kv * const out);
+
+  extern struct kv *
+sst_last_key(struct sst * const map, struct kv * const out);
+
   extern void
 sst_destroy(struct sst * const map);
 

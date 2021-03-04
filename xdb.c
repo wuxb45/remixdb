@@ -47,7 +47,7 @@ struct wal {
 // map
 struct xdb {
   // 1st line
-  struct mt_pair * volatile version;
+  struct mt_pair * volatile mt_view;
   u64 padding1[7];
 
   struct qsbr * qsbr;
@@ -82,14 +82,14 @@ struct xdb_ref {
     struct wormref * wmt_ref_wh;
   };
   union {
-    struct mt_pair * version;
+    struct mt_pair * mt_view;
     struct qsbr_ref qref;
   };
 };
 
 struct xdb_iter {
   struct xdb_ref * db_ref;
-  struct mt_pair * version; // the version used to create the miter
+  struct mt_pair * mt_view; // the version used to create the miter
   struct miter * miter;
 };
 // }}} struct
@@ -128,8 +128,9 @@ wal_flush(struct wal * const wal)
     return;
 
   const size_t wsize = bits_round_up(wal->bufoff, 12); // whole pages
+  debug_assert(wsize < WAL_BLKSZ);
   memset(wal->buf + wal->bufoff, 0, wsize - wal->bufoff);
-  wring_write_partial(wal->wring, wal->woff, wal->buf, 0, wsize);
+  wring_write_partial(wal->wring, (off_t)wal->woff, wal->buf, 0, (u32)wsize);
   wal->buf = wring_acquire(wal->wring);
   debug_assert(wal->buf);
   wal->bufoff = 0;
@@ -332,7 +333,7 @@ xdb_unref_all(struct xdb_ref * const ref)
     ref->wmt_ref = NULL;
   }
   cpu_cfence();
-  ref->version = NULL;
+  ref->mt_view = NULL;
   // don't need to clear memory
 }
 
@@ -340,15 +341,15 @@ xdb_unref_all(struct xdb_ref * const ref)
   static void
 xdb_ref_all(struct xdb_ref * const ref)
 {
-  ref->version = ref->xdb->version;
+  ref->mt_view = ref->xdb->mt_view;
   ref->v = msstz_getv(ref->xdb->z);
   ref->vref = msstv_ref(ref->v);
 
-  ref->wmt_ref = kvmap_ref(wmt_api, ref->version->wmt);
+  ref->wmt_ref = kvmap_ref(wmt_api, ref->mt_view->wmt);
   debug_assert(ref->wmt_ref);
 
-  if (ref->version->imt) {
-    ref->imt_ref = kvmap_ref(imt_api, ref->version->imt);
+  if (ref->mt_view->imt) {
+    ref->imt_ref = kvmap_ref(imt_api, ref->mt_view->imt);
     debug_assert(ref->imt_ref);
   }
   xdb_ref_leave(ref);
@@ -357,7 +358,7 @@ xdb_ref_all(struct xdb_ref * const ref)
   static void
 xdb_ref_update_version(struct xdb_ref * const ref)
 {
-  if (ref->xdb->version != ref->version) {
+  if (ref->xdb->mt_view != ref->mt_view) {
     xdb_unref_all(ref);
     xdb_ref_all(ref);
   }
@@ -483,9 +484,9 @@ xdb_do_comp(struct xdb * const xdb, const u64 max_rejsz)
   const double t0 = time_sec();
   xdb_lock(xdb);
 
-  // switch version
-  struct mt_pair * const v_comp = xdb->version->next;
-  xdb->version = v_comp; // wmt => wmt+imt
+  // switch mt_view
+  struct mt_pair * const v_comp = xdb->mt_view->next;
+  xdb->mt_view = v_comp; // wmt => wmt+imt
 
   // switch the log
   const u64 walsz0 = wal_switch(&xdb->wal, msstz_version(xdb->z) + 1); // match the next version
@@ -518,8 +519,8 @@ xdb_do_comp(struct xdb * const xdb, const u64 max_rejsz)
   free(anchors);
   msstz_putv(xdb->z, oldv);
 
-  struct mt_pair * const v_normal = xdb->version->next;
-  xdb->version = v_normal;
+  struct mt_pair * const v_normal = v_comp->next;
+  xdb->mt_view = v_normal;
   qsbr_wait(xdb->qsbr, (u64)v_normal);
   const double t_wait2 = time_sec();
 
@@ -615,7 +616,7 @@ struct wal_kv {
   static const u8 *
 wal_vi128_decode(const u8 * ptr, const u8 * const end, struct wal_kv * const wal_kv)
 {
-  const u32 safelen = (end - ptr) < 10 ? (end - ptr) : 10;
+  const u32 safelen = (u32)((end - ptr) < 10 ? (end - ptr) : 10);
   u32 count = 0;
   for (u32 i = 0; i < safelen; i++) {
     if ((ptr[i] & 0x80) == 0)
@@ -790,7 +791,7 @@ xdb_wal_recover(struct xdb * const xdb)
         const u64 nr = wal->woff - rsize;
         u8 zeroes[PGSZ];
         memset(zeroes, 0, nr);
-        pwrite(wal->fds[0], zeroes, nr, rsize);
+        pwrite(wal->fds[0], zeroes, nr, (off_t)rsize);
         fdatasync(wal->fds[0]);
       }
       msstz_log(xdb->z, "%s wal rsize %lu woff %lu mtsz %lu fd %d\n", __func__, rsize, wal->woff, xdb->mtsz, wal->fds[0]);
@@ -824,7 +825,7 @@ xdb_open(const char * const dir, const size_t cache_size_mb, const size_t mt_siz
 
   xdb->mt_views[2] = (struct mt_pair){.wmt = xdb->mt2, .next = &xdb->mt_views[3]};
   xdb->mt_views[3] = (struct mt_pair){.wmt = xdb->mt1, .imt = xdb->mt2, .next = &xdb->mt_views[0]};
-  xdb->version = xdb->mt_views; // [0]
+  xdb->mt_view = xdb->mt_views; // [0]
 
   xdb->z = msstz_open(dir, cache_size_mb, ckeys);
   xdb->qsbr = qsbr_create();
@@ -971,7 +972,7 @@ xdb_write_enter(struct xdb_ref * const ref)
 struct xdb_mt_merge_ctx {
   struct kv * new_kv;
   struct xdb * xdb;
-  struct mt_pair * version;
+  struct mt_pair * mt_view;
   bool success;
 };
 
@@ -987,7 +988,7 @@ xdb_mt_update_func(struct kv * const kv0, void * const priv)
   debug_assert(xdb->mtsz >= oldsz);
 
   xdb_lock(xdb);
-  if (unlikely(xdb->version != ctx->version)) {
+  if (unlikely(xdb->mt_view != ctx->mt_view)) {
     // abort
     xdb_unlock(xdb);
     return kv0;
@@ -1013,7 +1014,7 @@ xdb_update(struct xdb_ref * const ref, const struct kref * const kref, struct kv
   do {
     xdb_ref_update_version(ref);
     xdb_ref_enter(ref);
-    ctx.version = ref->version;
+    ctx.mt_view = ref->mt_view;
     s = wmt_api->merge(ref->wmt_ref, kref, xdb_mt_update_func, &ctx);
     xdb_ref_leave(ref);
   } while (!ctx.success);
@@ -1057,22 +1058,22 @@ xdb_sync(struct xdb_ref * const ref)
 xdb_iter_miter_ref(struct xdb_iter * const iter)
 {
   struct xdb_ref * const ref = iter->db_ref;
-  struct mt_pair * const version = ref->version;
-  iter->version = version; // remember version used by miter
+  struct mt_pair * const mt_view = ref->mt_view;
+  iter->mt_view = mt_view; // remember mt_view used by miter
 
   miter_add(iter->miter, &kvmap_api_msstv_ts, ref->v);
 
-  if (version->imt)
-    miter_add(iter->miter, imt_api, version->imt);
+  if (mt_view->imt)
+    miter_add(iter->miter, imt_api, mt_view->imt);
 
-  miter_add(iter->miter, wmt_api, version->wmt);
+  miter_add(iter->miter, wmt_api, mt_view->wmt);
 }
 
   static void
 xdb_iter_update_version(struct xdb_iter * const iter)
 {
   struct xdb_ref * const ref = iter->db_ref;
-  if (ref->version == ref->xdb->version && iter->version == ref->version)
+  if ((ref->mt_view == ref->xdb->mt_view) && (iter->mt_view == ref->mt_view))
     return;
 
   miter_clean(iter->miter);
