@@ -11,7 +11,6 @@
 #include "kv.h"
 #include <assert.h> // static_assert
 #include <dirent.h> // opendir
-#include <stdarg.h> // va_start
 #include <sys/uio.h> // writev
 #include "sst.h"
 
@@ -181,7 +180,7 @@ struct sst {
   u32 inr; // number of index keys in ioffs
   u32 nblks; // number of 4kB data blocks
   int fd;
-  u32 refcnt; // not atomic; only msstz can change it; should close/unmap only when == 1
+  u32 refcnt; // not atomic; an sst can be referenced by multiple msst (versions of partitions)
   struct rcache * rc;
   const u32 * ioffs; // offsets of the index keys
   u8 * mem; // pointer to the mmap area
@@ -1105,7 +1104,7 @@ sst_iter_skip(struct sst_iter * const iter, const u32 nr)
   do {
     const u32 ncap = bms[pptr->blkid].nkeys - pptr->keyid;
     if (todo < ncap) {
-      pptr->keyid += todo;
+      pptr->keyid += (u16)todo;
       if (iter->kvdata)
         sst_iter_fix_kv_reuse(iter);
       return; // done
@@ -1169,7 +1168,7 @@ sst_dump(struct sst * const sst, const char * const fn)
 struct msst {
   u64 seq;
   u32 nway;
-  au32 refcnt;
+  u32 refcnt; // not atomic: -- in msstz_gc(); ++ in append-to-v; no race condition
   struct ssty * ssty; // ssty makes it mssty
   struct rcache * rc;
   struct sst ssts[MSST_NWAY];
@@ -2522,6 +2521,8 @@ struct ssty_build_info {
   u32 valid; // output: number of valid keys
   u32 uniqx[MSST_NWAY]; // output: uniq non-stale keys at each level
 };
+
+static __thread u64 ssty_build_ckeys_reads = 0; // number of bytes
 // }}} bi
 
 // sstc_iter {{{
@@ -2691,13 +2692,17 @@ static const struct kvmap_api kvmap_api_sstc = {
 msstb_use_ckeys(struct msst * const msstx1)
 {
   bool use_ckeys = true;
+  u64 ckeys_size = 0;
   for (u32 i = 0; i < msstx1->nway; i++) {
     const struct sst_meta * const meta = sst_meta(&(msstx1->ssts[i]));
     if ((meta->totkv != 0) && (meta->ckeyssz == 0)) {
       use_ckeys = false;
       break;
     }
+    ckeys_size += meta->ckeyssz;
   }
+  if (use_ckeys)
+    ssty_build_ckeys_reads += ckeys_size;
   return use_ckeys;
 }
 // }}} sstc_iter
@@ -3332,7 +3337,7 @@ ssty_build_at(const int dfd, struct msst * const msstx1,
   free(bi.ranks);
 
   //write level indicators and seek ptrs
-  const u32 size2 = sizeof(struct sst_ptr) * nsecs * nway;
+  const u32 size2 = (u32)(sizeof(struct sst_ptr) * nsecs * nway);
   write(fdout, bi.ptrs, size2);
   free(bi.ptrs);
 
@@ -3447,7 +3452,7 @@ struct msstv { // similar to a version in leveldb
   u64 nr; // number of partitions
   u64 nslots; // assert(nr <= nslots)
   struct msstv * next; // to older msstvs
-  au64 rdrcnt; // active readers
+  au64 rdrcnt; // active readers; updated concurrently
   struct rcache * rc; // rcache
 
   struct msstv_part {
@@ -3581,7 +3586,7 @@ msstv_open_at(const int dfd, const char * const filename)
     struct kv * const anchor = (typeof(anchor))cursor;
     const u64 magic = anchor->priv;
     // rc: msstz_open sets rc later; compaction sets rc manually
-    struct msst * const mssty = mssty_open_at(dfd, magic / 100, magic % 100);
+    struct msst * const mssty = mssty_open_at(dfd, magic / 100lu, (u32)(magic % 100lu));
     if (!mssty) {
       msstv_destroy(v);
       free(buf);
@@ -3941,7 +3946,7 @@ msstv_iter_park(struct msstv_iter * const vi)
 msstv_fprint(struct msstv * const v, FILE * const out)
 {
   fprintf(out, "%s v %lu nr %lu refcnt %lu rcache %s\n",
-      __func__, v->version, v->nr, v->rdrcnt, v->rc ? "ON" : "OFF");
+      __func__, v->version, v->nr, atomic_load_explicit(&v->rdrcnt, MO_CONSUME), v->rc ? "ON" : "OFF");
 
   for (u64 i = 0; i < v->nr; i++) {
     struct msst * const msst = v->es[i].msst;
@@ -3986,27 +3991,20 @@ struct msstz {
   struct rcache * rc; // read-only cache
 
   double t0;
-  int stat_log; // for printf
+  int logfd;
   int dfd;
   u64 stat_time; // time spent in comp()
   u64 stat_writes; // total bytes written to sstx&ssty
-  u64 stat_reads; // total bytes read through rcache; user reads are included if running concurrently
+  u64 stat_reads; // total bytes read through rcache
 
   u64 padding1[7];
   rwlock head_lock; // writer: compaction, gc
 };
 
-  void
-msstz_log(struct msstz * const z, const char * const fmt, ...)
+  int
+msstz_logfd(struct msstz * const z)
 {
-  char buf[4096];
-  sprintf(buf, "%010.3lf %08x ", time_diff_sec(z->t0), crc32c_u64(0x12345678, (u64)pthread_self()));
-  strcat(buf, fmt);
-
-  va_list ap;
-  va_start(ap, fmt);
-  vdprintf(z->stat_log, buf, ap);
-  va_end(ap);
+  return z->logfd;
 }
 
   static void
@@ -4075,7 +4073,7 @@ msstz_open(const char * const dirname, const u64 cache_size_mb, const bool ckeys
     return NULL;
   }
 
-  hv->rdrcnt = 0;
+  atomic_store_explicit(&hv->rdrcnt, 0, MO_RELAXED);
   u64 seq = 0;
   for (u64 i = 0; i < hv->nr; i++) {
     const u64 magic = hv->es[i].anchor->priv;
@@ -4110,8 +4108,8 @@ msstz_open(const char * const dirname, const u64 cache_size_mb, const bool ckeys
   time_stamp2(buf, 64);
 
   sprintf(logfn, "log-%s", buf);
-  z->stat_log = openat(dfd, logfn, O_CREAT|O_WRONLY|O_TRUNC, 00644);
-  debug_assert(z->stat_log >= 0);
+  z->logfd = openat(dfd, logfn, O_CREAT|O_WRONLY|O_TRUNC, 00644);
+  debug_assert(z->logfd >= 0);
 
   unlinkat(dfd, "LOG", 0);
   symlinkat(logfn, dfd, "LOG");
@@ -4121,11 +4119,11 @@ msstz_open(const char * const dirname, const u64 cache_size_mb, const bool ckeys
   rwlock_init(&(z->head_lock));
   char ts[64];
   time_stamp(ts, 64);
-  msstz_log(z, "%s time %s v %lu seq %lu cache %lu\n", __func__, ts, msstz_version(z), seq0, cache_size_mb);
+  logger_printf(z->logfd, "%s time %s v %lu seq %lu cache %lu\n", __func__, ts, msstz_version(z), seq0, cache_size_mb);
 
   for (u64 i = 0; i < hv->nr; i++) {
     const u64 magic = hv->es[i].anchor->priv;
-    msstz_log(z, "%s [%3lu] %5lu\n", __func__, i, magic);
+    logger_printf(z->logfd, "%s [%3lu] %5lu\n", __func__, i, magic);
   }
   return z;
 }
@@ -4174,7 +4172,7 @@ msstz_gc(struct msstz * const z)
 
     struct msstv * const last = *pv;
     debug_assert(last->next == NULL);
-    if (last->rdrcnt) {
+    if (atomic_load_explicit(&last->rdrcnt, MO_CONSUME)) {
       break;
     } else { // do gc
       *pv = NULL; // remove from the list
@@ -4218,7 +4216,7 @@ msstz_gc(struct msstz * const z)
   // search file in dir
   DIR * const dir = opendir(z->dirname); // don't directly use the dfd
   if (!dir) {
-    msstz_log(z, "%s opendir() failed\n", __func__);
+    logger_printf(z->logfd, "%s opendir() failed\n", __func__);
     exit(0);
   }
 
@@ -4257,14 +4255,14 @@ msstz_gc(struct msstz * const z)
     }
     // now delete
     unlinkat(z->dfd, ent->d_name, 0);
-    //msstz_log(z, "%s unlink %s\n", __func__, ent->d_name);
+    //logger_printf(z->logfd, "%s unlink %s\n", __func__, ent->d_name);
     nu++;
   } while (true);
 
   free(vseq);
   free(vall);
   closedir(dir);
-  msstz_log(z, "%s gc dt-ms %lu free-v %lu close %lu unlink %lu\n", __func__, time_diff_nsec(t0)/1000000, nv, nc, nu);
+  logger_printf(z->logfd, "%s gc dt-ms %lu free-v %lu close %lu unlink %lu\n", __func__, time_diff_nsec(t0)/1000000, nv, nc, nu);
 }
 
   inline struct msstv *
@@ -4272,7 +4270,7 @@ msstz_getv(struct msstz * const z)
 {
   rwlock_lock_read(&(z->head_lock));
   struct msstv * const v = z->hv;
-  v->rdrcnt++;
+  atomic_fetch_add_explicit(&(v->rdrcnt), 1, MO_ACQUIRE);
   rwlock_unlock_read(&(z->head_lock));
   return v;
 }
@@ -4282,7 +4280,7 @@ msstz_putv(struct msstz * const z, struct msstv * const v)
 {
   (void)z;
   debug_assert(v->rdrcnt);
-  v->rdrcnt--;
+  atomic_fetch_sub_explicit(&(v->rdrcnt), 1, MO_RELEASE);
 }
 
   void
@@ -4291,7 +4289,7 @@ msstz_destroy(struct msstz * const z)
   struct msstv * iter = z->hv;
   debug_assert(iter);
   msstz_gc(z);
-  msstz_log(z, "%s hv %lu comp_time %lu writes %lu reads %lu\n", __func__,
+  logger_printf(z->logfd, "%s hv %lu comp_time %lu writes %lu reads %lu\n", __func__,
       iter->version, z->stat_time, z->stat_writes, z->stat_reads);
   while (iter) {
     struct msstv * next = iter->next;
@@ -4301,7 +4299,7 @@ msstz_destroy(struct msstz * const z)
   if (z->rc)
     rcache_destroy(z->rc);
 
-  close(z->stat_log);
+  close(z->logfd);
   free(z->dirname);
   close(z->dfd);
   free(z);
@@ -4343,7 +4341,7 @@ struct msstz_comp_info {
   void * map1; // memtable map
   au64 totsz;
   au64 stat_writes; // total bytes written to sstx&ssty
-  au64 stat_reads; // total bytes read through rcache; user reads are included if running concurrently
+  au64 stat_reads; // total bytes read through rcache
   au64 stat_minor;
   au64 stat_partial;
   au64 stat_major;
@@ -4430,7 +4428,7 @@ msstz_yq_consume(struct msstz_comp_info * const ci)
   task->y1 = msst; // done; the new partition is now loaded and ready to use
   //const u64 dt = time_diff_nsec(t0);
   //const struct ssty_meta * const ym = msst->ssty->meta;
-  //msstz_log(z, "%s dt-ms %lu ssty-build %lu %02u nkidx %u ysz %u xkv %u xsz %u uniq %u valid %u\n",
+  //logger_printf(z->logfd, "%s dt-ms %lu ssty-build %lu %02u nkidx %u ysz %u xkv %u xsz %u uniq %u valid %u\n",
   //    __func__, dt / 1000000, task->seq1, task->way1, msst->ssty->nkidx,
   //    ysz, ym->totkv, ym->totsz, ym->uniqx[0], ym->valid);
   return true;
@@ -4466,7 +4464,7 @@ msstz_comp_ssts(struct msstz_comp_info * const ci, const u64 ipart, struct miter
     const u64 sizex = sst_build_at(z->dfd, miter, seq, way, z->nblks, split, z->ckeys, NULL, kz);
     //const u64 dt = time_diff_nsec(t0);
     ci->stat_writes += sizex;
-    //msstz_log(z, "%s dt-ms %lu sst-build %lu-%02u %lu\n", __func__, dt / 1000000, seq, way, sizex);
+    //logger_printf(z->logfd, "%s dt-ms %lu sst-build %lu-%02u %lu\n", __func__, dt / 1000000, seq, way, sizex);
     way++;
 
     struct kv * const tmpz = miter_peek(miter, tmp); // the current unconsumed key
@@ -4497,7 +4495,7 @@ msstz_comp_ssts(struct msstz_comp_info * const ci, const u64 ipart, struct miter
   } while (true);
   debug_assert(split || (np == 1)); // only split can return more than one partition
   free(tmp);
-  //msstz_log(z, "%s np %u seq0 %lu way0 %u seq %lu way %u\n", __func__, np, seq0, way0, seq, way);
+  //logger_printf(z->logfd, "%s np %u seq0 %lu way0 %u seq %lu way %u\n", __func__, np, seq0, way0, seq, way);
 }
 
   static void
@@ -4558,7 +4556,7 @@ msstz_comp_harvest(struct msstz_comp_info * const ci)
     sz += t->y1->ssty->size;
   }
   struct msstz * const z = ci->z;
-  msstz_log(z, "%s v %lu nr %lu ssty-size %lu\n", __func__, v1->version, nr, sz);
+  logger_printf(z->logfd, "%s v %lu nr %lu ssty-size %lu\n", __func__, v1->version, nr, sz);
 
   v1->rc = z->rc;
   v1->next = v0;
@@ -4651,11 +4649,12 @@ msstz_comp_analyze(struct msstz_comp_info * const ci, const u64 ipart)
   const struct ssty_meta * const meta = msst->ssty->meta;
   const u32 nway = msst->nway;
 
+  struct msstz * const z = ci->z;
   // MAJOR: no existing data at all
   if (meta->valid == 0) { // this also avoids divide-by-zero below
     cpart->ratio = (float)newsz;
     cpart->bestway = 0;
-    msstz_log(ci->z, "%s newsz %lu direct-major\n", __func__, newsz);
+    logger_printf(z->logfd, "%s newsz %lu direct-major\n", __func__, newsz);
     return time_diff_nsec(t0);
   }
 
@@ -4670,7 +4669,7 @@ msstz_comp_analyze(struct msstz_comp_info * const ci, const u64 ipart)
   if (!overlap && !kz && nway > 1 && newsz > MSSTZ_ETSZ) {
     cpart->ratio = (float)newsz; // worth doing
     cpart->bestway = MSST_NWAY;
-    msstz_log(ci->z, "%s newsz %lu store-append\n", __func__, newsz);
+    logger_printf(z->logfd, "%s newsz %lu store-append\n", __func__, newsz);
     return time_diff_nsec(t0);
   }
 
@@ -4731,12 +4730,12 @@ msstz_comp_analyze(struct msstz_comp_info * const ci, const u64 ipart)
   //for (u32 i = 0; i <= nway; i++) {
   //  const u64 sz = (i < nway) ? (msst->ssts[i].nblks * PGSZ) : newsz;
   //  const float pct = ((float)sz) * 100.0f / (float)MSSTZ_TSZ;
-  //  msstz_log(ci->z, "%c[%c%x] sz %9lu %6.2f%% wx %6lu wy %6lu nway1 %4.1f wa %4.1f bonus %4.1f score %5.2f\n",
+  //  logger_printf(z->logfd, "%c[%c%x] sz %9lu %6.2f%% wx %6lu wy %6lu nway1 %4.1f wa %4.1f bonus %4.1f score %5.2f\n",
   //      (i == bestway ? '>':' '), (i == nway ? '*' : ' '), i,
   //      sz, pct, f[i].wx, f[i].wy, f[i].nway1, f[i].wa, f[i].bonus, f[i].score);
   //}
   const u64 dt = time_diff_nsec(t0);
-  msstz_log(ci->z, "%s dt-ms %lu magic0 %lu totkv0 %u valid0 %u newnr %u newsz %lu minor %.1f major %.1f bestway %u ratio %.3f\n",
+  logger_printf(z->logfd, "%s dt-ms %lu magic0 %lu totkv0 %u valid0 %u newnr %u newsz %lu minor %.1f major %.1f bestway %u ratio %.3f\n",
       __func__, dt / 1000000, meta->magic, meta->totkv, meta->valid,
       newnr, newsz, f[nway].nway1, f[0].nway1, bestway, cpart->ratio);
   return dt;
@@ -4884,6 +4883,8 @@ msstz_comp_worker_coq_co(void)
   static void *
 msstz_comp_worker(void * const ptr)
 {
+  ssty_build_ckeys_reads = 0;
+  rcache_thread_stat_reset();
   struct msstz_comp_info * const ci = (typeof(ci))ptr;
   const u32 nco = ci->co_per_worker;
   if (nco > 1) {
@@ -4901,6 +4902,7 @@ msstz_comp_worker(void * const ptr)
     debug_assert(nco == 1);
     msstz_comp_worker_func(ci);
   }
+  ci->stat_reads += ssty_build_ckeys_reads;
   ci->stat_reads += (rcache_thread_stat_reads() * PGSZ);
   return NULL;
 }
@@ -4940,20 +4942,20 @@ msstz_comp_reject(struct msstz_comp_info * const ci, const u64 max_reject)
   u64 rejsz = 0;
   u64 nrej = 0;
   struct msstz * const z = ci->z;
-  msstz_log(z, "%s ratio min %.3f max %.3f\n", __func__, ci->parts[0].ratio, ci->parts[nr-1].ratio);
+  logger_printf(z->logfd, "%s ratio min %.3f max %.3f\n", __func__, ci->parts[0].ratio, ci->parts[nr-1].ratio);
   for (u64 i = 0; i < nr; i++) {
     struct msstz_comp_part * const cp = &(ci->parts[i]);
     // no more rejections
     if ((cp->newsz > z->minsz) || ((rejsz + cp->newsz) > max_reject) || cp->ratio > 0.1f) {
-      msstz_log(z, "%s i %lu/%lu (newsz %lu > minsz %lu) || ((rejsz %lu + newsz %lu) > max_reject %lu) || (ratio %.3f > 0.1)\n",
-          __func__, i, nr, cp->ratio, cp->newsz, z->minsz, rejsz, cp->newsz, max_reject, cp->ratio);
+      logger_printf(z->logfd, "%s i %lu/%lu (newsz %lu > minsz %lu) || ((rejsz %lu + newsz %lu) > max_reject %lu) || (ratio %.3f > 0.1)\n",
+          __func__, i, nr, cp->newsz, z->minsz, rejsz, cp->newsz, max_reject, cp->ratio);
       break;
     }
     rejsz += cp->newsz;
     nrej++;
     cp->bestway = MSSTZ_NWAY_MINOR; // reject
   }
-  msstz_log(z, "%s reject size %lu/%lu np %lu/%lu\n", __func__, rejsz, ci->totsz, nrej, nr);
+  logger_printf(z->logfd, "%s reject size %lu/%lu np %lu/%lu\n", __func__, rejsz, ci->totsz, nrej, nr);
 
   // resume idx order
   qsort(ci->parts, nr, sizeof(ci->parts[0]), msstz_cmp_idx);
@@ -4973,10 +4975,10 @@ msstz_comp_stat(struct msstz_comp_info * const ci)
   const u64 ta = ci->time_analyze;
   const u64 tx = ci->time_comp_x;
   const u64 ty = ci->time_comp_y;
-  msstz_log(z, "%s dt-s %.6lf dw-mb %lu mbps %lu dr-mb %lu mbps %lu append %lu major %lu partial %lu minor %lu\n",
+  logger_printf(z->logfd, "%s dt-s %.6lf dw-mb %lu mbps %lu dr-mb %lu mbps %lu append %lu major %lu partial %lu minor %lu\n",
       __func__, ((double)dt) * 1e-9, dw>>20, (dw<<10)/dt, dr>>20, (dr<<10)/dt,
       ci->stat_append, ci->stat_major, ci->stat_partial, ci->stat_minor);
-  msstz_log(z, "%s  dta %lu/%lu %3lu%% dtc (%lu+%lu)/%lu %3lu%%\n",
+  logger_printf(z->logfd, "%s  dta %lu/%lu %3lu%% dtc (%lu+%lu)/%lu %3lu%%\n",
       __func__, ta/1000000, ci->dta/1000000, ta*100lu/ci->dta,
       tx/1000000, ty/1000000, ci->dtc/1000000, (tx+ty)*100lu/ci->dtc);
 }

@@ -36,7 +36,7 @@ update_worker(void * const ptr)
   struct xdb_ref * const ref = remixdb_ref(xdb);
   u8 ktmp[16];
   u8 * const vtmp = calloc(1, 1lu << 16);
-  memset(vtmp, random_u64(), 1lu << 16);
+  memset(vtmp, (int)random_u64(), 1lu << 16);
 
   //printf("random update [%lu, %lu]\n", base, base+mask);
   // set/del
@@ -51,7 +51,7 @@ update_worker(void * const ptr)
     if (v == 0) { // delete
       remixdb_del(ref, ktmp, 16);
     } else { // update
-      const u32 vlen = ((i & 0x3fffu) != 0x1357u) ? ((r & 0xf0) + 100) : (((r & 0xf0) << 6) + 4200);
+      const u32 vlen = ((i & 0x3fffu) != 0x1357u) ? (((u32)r & 0xf0) + 100) : ((((u32)r & 0xf0) << 6) + 4200);
       remixdb_set(ref, ktmp, 16, vtmp, vlen);
     }
   }
@@ -158,7 +158,7 @@ main(int argc, char** argv)
     epoch = i;
 
     all_seq = 0;
-    const double dt = thread_fork_join(nths_update, update_worker, false, NULL);
+    const u64 dt = thread_fork_join(nths_update, update_worker, false, NULL);
     if ((epoch & 0x3u) == 0x3u) { // close/open every 4 epochs
       remixdb_close(xdb);
       // turn on/off ckeys alternatively, very stressful.

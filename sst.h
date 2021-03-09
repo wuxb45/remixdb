@@ -455,8 +455,8 @@ msstz_open(const char * const dirname, const u64 cache_size_mb, const bool ckeys
   extern void
 msstz_destroy(struct msstz * const z);
 
-  extern void
-msstz_log(struct msstz * const z, const char * const fmt, ...);
+  extern int
+msstz_logfd(struct msstz * const z);
 
 // return number of bytes written since opened
   extern u64

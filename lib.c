@@ -18,6 +18,7 @@
 #include <poll.h>
 #include <sys/ioctl.h>
 #include <time.h>
+#include <stdarg.h> // va_start
 
 #if defined(__linux__)
 #include <linux/fs.h>
@@ -376,6 +377,17 @@ debug_wait_gdb(void * const bt_state)
   // uncomment this line to surrender the shell on error
   // kill(getpid(), SIGSTOP); // stop burning cpu, once
 
+  static au32 nr_waiting = 0;
+  const u32 seq = atomic_fetch_add_explicit(&nr_waiting, 1, MO_RELAXED);
+  if (seq == 0) {
+    sprintf(buf, "/run/user/%u/.debug_wait_gdb_pid", getuid());
+    const int pidfd = open(buf, O_CREAT|O_TRUNC|O_WRONLY, 00644);
+    if (pidfd >= 0) {
+      dprintf(pidfd, "%u", getpid());
+      close(pidfd);
+    }
+  }
+
 #pragma nounroll
   while (atomic_load_explicit(&v, MO_CONSUME))
     sleep(1);
@@ -728,7 +740,7 @@ typedef cpuset_t cpu_set_t;
 #elif defined(__APPLE__) && defined(__MACH__)
 typedef u64 cpu_set_t;
 #define CPU_SETSIZE ((64))
-#define CPU_COUNT(__cpu_ptr__) (__builtin_popcount(*__cpu_ptr__))
+#define CPU_COUNT(__cpu_ptr__) (__builtin_popcountl(*__cpu_ptr__))
 #define CPU_ISSET(__cpu_idx__, __cpu_ptr__) (((*__cpu_ptr__) >> __cpu_idx__) & 1lu)
 #define CPU_ZERO(__cpu_ptr__) ((*__cpu_ptr__) = 0)
 #define CPU_SET(__cpu_idx__, __cpu_ptr__) ((*__cpu_ptr__) |= (1lu << __cpu_idx__))
@@ -2084,6 +2096,24 @@ ptr_to_u64(const void * const ptr)
   return (u64)ptr;
 }
 
+// portable malloc_usable_size
+  inline size_t
+m_usable_size(void * const ptr)
+{
+#if defined(__linux__) || defined(__FreeBSD__)
+  const size_t sz = malloc_usable_size(ptr);
+#elif defined(__APPLE__) && defined(__MACH__)
+  const size_t sz = malloc_size(ptr);
+#endif // OS
+
+#ifndef HEAPCHECKING
+  // valgrind and asan may return unaligned usable size
+  debug_assert((rsz & 0x7lu) == 0);
+#endif // HEAPCHECKING
+
+  return sz;
+}
+
   inline size_t
 fdsize(const int fd)
 {
@@ -2100,7 +2130,7 @@ fdsize(const int fd)
     u64 nblks = 0;
     ioctl(fd, DKIOCGETBLOCKSIZE, &blksz);
     ioctl(fd, DKIOCGETBLOCKCOUNT, &nblks);
-    st.st_size = blksz * nblks;
+    st.st_size = (ssize_t)(blksz * nblks);
 #elif defined(__FreeBSD__)
     ioctl(fd, DIOCGMEDIASIZE, &st.st_size);
 #endif // OS
@@ -2142,6 +2172,27 @@ memlcp(const u8 * p1, const u8 * p2, const u32 max)
     p2++;
   }
   return clen;
+}
+
+static double logger_t0 = 0.0;
+
+__attribute__((constructor))
+  static void
+logger_init(void)
+{
+  logger_t0 = time_sec();
+}
+
+__attribute__ ((format (printf, 2, 3)))
+  void
+logger_printf(const int fd, const char * const fmt, ...)
+{
+  char buf[4096];
+  va_list ap;
+  va_start(ap, fmt);
+  vsnprintf(buf, sizeof(buf), fmt, ap);
+  va_end(ap);
+  dprintf(fd, "%010.3lf %08x %s", time_diff_sec(logger_t0), crc32c_u64(0x12345678, (u64)pthread_self()), buf);
 }
 // }}} misc
 
@@ -2437,21 +2488,21 @@ astk_push_unsafe(au64 * const pmagic, struct acell * const first,
   atomic_store_explicit(pmagic, m1, MO_RELAXED);
 }
 
-// can fail for two reasons: (1) NULL: no available object; (2) ~0lu: contention
-  static void *
-astk_try_pop(au64 * const pmagic)
-{
-  u64 m0 = atomic_load_explicit(pmagic, MO_CONSUME);
-  struct acell * const ret = astk_ptr(m0);
-  if (ret == NULL)
-    return NULL;
-
-  const u64 m1 = astk_m1(m0, ret->next);
-  if (atomic_compare_exchange_weak_explicit(pmagic, &m0, m1, MO_ACQUIRE, MO_RELAXED))
-    return ret;
-  else
-    return (void *)(~0lu);
-}
+//// can fail for two reasons: (1) NULL: no available object; (2) ~0lu: contention
+//  static void *
+//astk_try_pop(au64 * const pmagic)
+//{
+//  u64 m0 = atomic_load_explicit(pmagic, MO_CONSUME);
+//  struct acell * const ret = astk_ptr(m0);
+//  if (ret == NULL)
+//    return NULL;
+//
+//  const u64 m1 = astk_m1(m0, ret->next);
+//  if (atomic_compare_exchange_weak_explicit(pmagic, &m0, m1, MO_ACQUIRE, MO_RELAXED))
+//    return ret;
+//  else
+//    return (void *)(~0lu);
+//}
 
   static void *
 astk_pop_safe(au64 * const pmagic)
@@ -2509,8 +2560,13 @@ struct slab {
   u64 padding3[4];
 
   // 4th line
-  mutex lock;
+  union {
+    mutex lock;
+    u64 padding4[8];
+  };
 };
+static_assert(sizeof(struct slab) == 256, "sizeof(struct slab) != 256");
+
 
   static void
 slab_add(struct slab * const slab, struct acell * const blk, const bool is_safe)
@@ -2556,33 +2612,58 @@ slab_expand(struct slab * const slab, const bool is_safe)
   return true;
 }
 
-  struct slab *
-slab_create(const u64 obj_size, const u64 blk_size)
+// return 0 on failure; otherwise, obj0_offset
+  static u64
+slab_check_sizes(const u64 obj_size, const u64 blk_size)
 {
   // obj must be non-zero and 8-byte aligned
   // blk must be at least of page size and power of 2
   if ((!obj_size) || (obj_size % 8lu) || (blk_size < 4096lu) || (blk_size & (blk_size - 1)))
-    return NULL;
+    return 0;
 
   // each slab should have at least one object
   const u64 obj0_offset = (obj_size & (obj_size - 1)) ? SLAB_OBJ0_OFFSET : obj_size;
   if (obj0_offset >= blk_size || (blk_size - obj0_offset) < obj_size)
+    return 0;
+
+  return obj0_offset;
+}
+
+  static void
+slab_init_internal(struct slab * const slab, const u64 obj_size, const u64 blk_size, const u64 obj0_offset)
+{
+  memset(slab, 0, sizeof(*slab));
+  slab->obj_size = obj_size;
+  slab->blk_size = blk_size;
+  slab->objs_per_slab = (blk_size - obj0_offset) / obj_size;
+  debug_assert(slab->objs_per_slab); // >= 1
+  slab->obj0_offset = obj0_offset;
+  mutex_init(&(slab->lock));
+}
+
+  static bool
+slab_init(struct slab * const slab, const u64 obj_size, const u64 blk_size)
+{
+  const u64 obj0_offset = slab_check_sizes(obj_size, blk_size);
+  if (!obj0_offset)
+    return false;
+
+  slab_init_internal(slab, obj_size, blk_size, obj0_offset);
+  return true;
+}
+
+  struct slab *
+slab_create(const u64 obj_size, const u64 blk_size)
+{
+  const u64 obj0_offset = slab_check_sizes(obj_size, blk_size);
+  if (!obj0_offset)
     return NULL;
 
   struct slab * const slab = yalloc(sizeof(*slab));
   if (slab == NULL)
     return NULL;
 
-  memset(slab, 0, sizeof(*slab));
-
-  // const
-  slab->obj_size = obj_size;
-  slab->blk_size = blk_size;
-  slab->objs_per_slab = (blk_size - obj0_offset) / obj_size;
-  debug_assert(slab->objs_per_slab); // >= 1
-  slab->obj0_offset = obj0_offset;
-
-  mutex_init(&(slab->lock));
+  slab_init_internal(slab, obj_size, blk_size, obj0_offset);
   return slab;
 }
 
@@ -2681,8 +2762,8 @@ slab_get_nalloc(struct slab * const slab)
   return n;
 }
 
-  void
-slab_destroy(struct slab * const slab)
+  static void
+slab_deinit(struct slab * const slab)
 {
   debug_assert(slab);
   struct acell * iter = slab->head_active;
@@ -2697,49 +2778,25 @@ slab_destroy(struct slab * const slab)
     pages_unmap(iter, slab->blk_size);
     iter = next;
   }
+}
+
+  void
+slab_destroy(struct slab * const slab)
+{
+  slab_deinit(slab);
   free(slab);
 }
 // }}} slab
 
-// mpool {{{
-// TODO: mpool is experimental
-#define MPOOL_RANKS ((128lu))
-#define MPOOL_SHARDS ((8lu))
-#define MPOOL_SHARD_MASK ((MPOOL_SHARDS - 1lu))
-
-struct mpool {
-  au64 vec[MPOOL_RANKS][MPOOL_SHARDS][8]; // only use vec[x][y][0]
+// arena {{{
+struct arena {
+  u64 nr_ranks;
+  u64 padding1[7];
+  struct slab slabs[0];
 };
 
-static __thread u64 mpool_seq = 0;
-
-  struct mpool *
-mpool_create(void)
-{
-  size_t memsz;
-  struct mpool * const ret = pages_alloc_best(sizeof(*ret), false, &memsz);
-  if (ret == NULL)
-    return NULL;
-
-  debug_assert(memsz == sizeof(*ret));
-  return ret;
-}
-
-  void
-mpool_destroy(struct mpool * const mp)
-{
-  for (u64 i = 0; i < MPOOL_RANKS; i++) {
-    for (u64 j = 0; j < MPOOL_SHARDS; j++) {
-      au64 * const pmagic = mp->vec[i][j];
-      for (void * ptr = astk_pop_unsafe(pmagic); ptr; ptr = astk_pop_unsafe(pmagic))
-        free(ptr);
-    }
-  }
-  pages_unmap(mp, sizeof(*mp));
-}
-
   static size_t
-mpool_rank(const size_t sz)
+arena_rank(const size_t sz)
 {
   // 0 -> large number
   // 1..8 -> 0
@@ -2749,60 +2806,53 @@ mpool_rank(const size_t sz)
   return (sz - 1) >> 3;
 }
 
-  void *
-mpool_alloc(struct mpool * const mp, const size_t sz)
+  struct arena *
+arena_create(const u64 nr_ranks, const u64 blk_size)
 {
-  const size_t rank = mpool_rank(sz);
-  if (rank < MPOOL_RANKS) {
-    void * const ret = astk_try_pop(mp->vec[rank][mpool_seq]);
-    if (ret) {
-      if (~(u64)ret) { // success
-        return ret;
-      } else { // contention
-        mpool_seq = (mpool_seq + 1) & MPOOL_SHARD_MASK;
-      }
-    }
-  }
-  return malloc(sz);
+  struct arena * const a = yalloc(sizeof(*a) + (sizeof(a->slabs[0]) * nr_ranks));
+  if (!a)
+    return NULL;
+  a->nr_ranks = nr_ranks;
+  for (u64 i = 0; i < nr_ranks; i++)
+    slab_init(&a->slabs[i], (i << 3) + 8, blk_size);
+  return a;
 }
 
-  static size_t
-mpool_usize(void * const ptr)
+  void *
+arena_alloc(struct arena * const a, const size_t size)
 {
-#if defined(__linux__)
-  const size_t sz = malloc_usable_size(ptr);
-#elif defined(__FreeBSD__)
-  const size_t sz = malloc_usable_size(ptr);
-#elif defined(__APPLE__) && defined(__MACH__)
-  const size_t sz = malloc_size(ptr);
-#endif // OS
-
-#ifdef HEAPCHECKING
-  // valgrind and asan may return unaligned usable size
-  const size_t rsz = sz & (~7lu);
-#else // HEAPCHECKING
-  const size_t rsz = sz;
-#endif // HEAPCHECKING
-
-  debug_assert((rsz & 0x7lu) == 0);
-  return rsz;
+  const u64 r = arena_rank(size);
+  if (r < a->nr_ranks)
+    return slab_alloc_safe(&a->slabs[r]);
+  else
+    return malloc(size);
 }
 
   void
-mpool_free(struct mpool * const mp, void * const ptr)
+arena_free(struct arena * const a, void * const ptr, const size_t size)
 {
-  const size_t rsz = mpool_usize(ptr);
-  const size_t rank = mpool_rank(rsz);
-
-  if (rank < MPOOL_RANKS) {
-    if (astk_try_push(mp->vec[rank][mpool_seq], ptr, ptr))
-      return;
-    else
-      mpool_seq = (mpool_seq + 1) & MPOOL_SHARD_MASK;
-  }
-  free(ptr);
+  const u64 r = arena_rank(size);
+  if (r < a->nr_ranks)
+    slab_free_safe(&a->slabs[r], ptr);
+  else
+    free(ptr);
 }
-// }}} mpool
+
+  void
+arena_clean(struct arena * const a)
+{
+  for (u64 i = 0; i < a->nr_ranks; i++)
+    slab_free_all(&a->slabs[i]);
+}
+
+  void
+arena_destroy(struct arena * const a)
+{
+  for (u64 i = 0; i < a->nr_ranks; i++)
+    slab_deinit(&a->slabs[i]);
+  free(a);
+}
+// }}} arena
 
 // qsort {{{
   int
@@ -3019,17 +3069,18 @@ strdec_64(void * const out, const u64 v)
   }
 }
 
+static const u8 strhex_table_16[16] = {'0','1','2','3','4','5','6','7','8','9','a','b','c','d','e','f'};
+
 #if defined(__x86_64__)
   static inline m128
 strhex_helper(const u64 v)
 {
   static const u8 mask1[16] = {15,7,14,6,13,5,12,4,11,3,10,2,9,1,8,0};
-  static const u8 ascii[16] = {'0','1','2','3','4','5','6','7','8','9','a','b','c','d','e','f'};
 
   const m128 tmp = _mm_set_epi64x((s64)(v>>4), (s64)v); // mm want s64
   const m128 hilo = _mm_and_si128(tmp, _mm_set1_epi8(0xf));
   const m128 bin = _mm_shuffle_epi8(hilo, _mm_load_si128((void *)mask1));
-  const m128 str = _mm_shuffle_epi8(_mm_load_si128((void *)ascii), bin);
+  const m128 str = _mm_shuffle_epi8(_mm_load_si128((const void *)strhex_table_16), bin);
   return str;
 }
 #elif defined(__aarch64__)
@@ -3037,24 +3088,22 @@ strhex_helper(const u64 v)
 strhex_helper(const u64 v)
 {
   static const u8 mask1[16] = {15,7,14,6,13,5,12,4,11,3,10,2,9,1,8,0};
-  static const u8 ascii[16] = {'0','1','2','3','4','5','6','7','8','9','a','b','c','d','e','f'};
   u64 v2[2] = {v, v>>4};
   const m128 tmp = vld1q_u8((u8 *)v2);
   const m128 hilo = vandq_u8(tmp, vdupq_n_u8(0xf));
   const m128 bin = vqtbl1q_u8(hilo, vld1q_u8(mask1));
-  const m128 str = vqtbl1q_u8(vld1q_u8(ascii), bin);
+  const m128 str = vqtbl1q_u8(vld1q_u8(strhex_table_16), bin);
   return str;
 }
 #else
-static u16 strhex_table[256];
+static u16 strhex_table_256[256];
 
 __attribute__((constructor))
   static void
 strhex_init(void)
 {
-  const u8 hex[16] = {'0','1','2','3','4','5','6','7','8','9','a','b','c','d','e','f'};
   for (u64 i = 0; i < 256; i++)
-    strhex_table[i] = (((u16)hex[i & 0xf]) << 8) | (hex[i>>4]);
+    strhex_table_256[i] = (((u16)strhex_table_16[i & 0xf]) << 8) | (strhex_table_16[i>>4]);
 }
 #endif // __x86_64__
 
@@ -3071,7 +3120,7 @@ strhex_32(void * const out, u32 v)
 #else
   u16 * const ptr = (typeof(ptr))out;
   for (u64 i = 0; i < 4; i++) {
-    ptr[3-i] = strhex_table[v & 0xff];
+    ptr[3-i] = strhex_table_256[v & 0xff];
     v >>= 8;
   }
 #endif
@@ -3090,7 +3139,7 @@ strhex_64(void * const out, u64 v)
 #else
   u16 * const ptr = (typeof(ptr))out;
   for (u64 i = 0; i < 8; i++) {
-    ptr[7-i] = strhex_table[v & 0xff];
+    ptr[7-i] = strhex_table_256[v & 0xff];
     v >>= 8;
   }
 #endif
@@ -3121,10 +3170,44 @@ a2s32(const void * const str)
   return (s32)strtoll(str, NULL, 10);
 }
 
+  void
+str_print_hex(FILE * const out, const void * const data, const u32 len)
+{
+  const u8 * const ptr = data;
+  const u32 strsz = len * 3;
+  u8 * const buf = malloc(strsz);
+  for (u32 i = 0; i < len; i++) {
+    buf[i*3] = ' ';
+    buf[i*3+1] = strhex_table_16[ptr[i]>>4];
+    buf[i*3+2] = strhex_table_16[ptr[i] & 0xf];
+  }
+  fwrite(buf, strsz, 1, out);
+  free(buf);
+}
+
+  void
+str_print_dec(FILE * const out, const void * const data, const u32 len)
+{
+  const u8 * const ptr = data;
+  const u32 strsz = len * 4;
+  u8 * const buf = malloc(strsz);
+  for (u32 i = 0; i < len; i++) {
+    const u8 v = ptr[i];
+    buf[i*4] = ' ';
+    const u8 v1 = v / 100u;
+    const u8 v23 = v % 100u;
+    buf[i*4+1] = (u8)'0' + v1;
+    buf[i*4+2] = (u8)'0' + (v23 / 10u);
+    buf[i*4+3] = (u8)'0' + (v23 % 10u);
+  }
+  fwrite(buf, strsz, 1, out);
+  free(buf);
+}
+
 // returns a NULL-terminated list of string tokens.
 // After use you only need to free the returned pointer (char **).
   char **
-string_tokens(const char * const str, const char * const delim)
+strtoks(const char * const str, const char * const delim)
 {
   if (str == NULL)
     return NULL;
@@ -3175,6 +3258,16 @@ fail_realloc:
 fail_buf:
   free(tokens);
   return NULL;
+}
+
+  u32
+strtoks_count(const char * const * const toks)
+{
+  if (!toks)
+    return 0;
+  int n = 0;
+  while (toks[n++]);
+  return n;
 }
 // }}} string
 
@@ -4544,8 +4637,8 @@ rcu_update(struct rcu * const rcu, void * const ptr)
 // }}} multi-rcu
 
 // qsbr {{{
-#define QSBR_STATES_NR ((23)) // 3*8-2 == 22; 5*8-2 == 38; 7*8-2 == 54
-#define QSBR_SHARD_BITS  ((5)) // bits <= 6
+#define QSBR_STATES_NR ((23)) // shard capacity; valid values are 3*8-1 == 23; 5*8-1 == 39; 7*8-1 == 55
+#define QSBR_SHARD_BITS  ((5)) // 2^n shards
 #define QSBR_SHARD_NR    (((1u) << QSBR_SHARD_BITS))
 #define QSBR_SHARD_MASK  ((QSBR_SHARD_NR - 1))
 
@@ -4908,7 +5001,7 @@ forker_papi_init(void)
   PAPI_library_init(PAPI_VER_CURRENT);
   PAPI_thread_init(pthread_self);
 
-  char ** const tokens = string_tokens(getenv("FORKER_PAPI_EVENTS"), ",");
+  char ** const tokens = strtoks(getenv("FORKER_PAPI_EVENTS"), ",");
   if (tokens == NULL)
     return;
   u64 nr = 0;
@@ -5054,7 +5147,7 @@ forker_pass(const int argc, char ** const argv, char ** const pref,
 
   bool done = false;
   FILE * fout[2] = {stdout, stderr};
-  const u32 printnr = isatty(fileno(stderr)) ? 1 : 2; // when stderr is not a tty, also print to stderr
+  const u32 printnr = (isatty(1) && isatty(2)) ? 1 : 2;
   struct vctr * const va = vctr_create(pi->vctr_size + forker_papi_nr);
   struct vctr * const vas = vctr_create(pi->vctr_size + forker_papi_nr);
   u64 dts = 0;

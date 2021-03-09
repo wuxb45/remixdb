@@ -7,6 +7,7 @@
 
 // headers {{{
 #include <assert.h> // static_assert
+#include <ctype.h>
 #include "lib.h"
 #include "ctypes.h"
 #include "kv.h"
@@ -68,10 +69,9 @@ kv_update_hash(struct kv * const kv)
   inline void
 kv_refill_value(struct kv * const kv, const void * const value, const u32 vlen)
 {
-  if (value && vlen) {
-    memcpy(&(kv->kv[kv->klen]), value, vlen);
-    kv->vlen = vlen;
-  }
+  debug_assert((vlen == 0) || value);
+  memcpy(&(kv->kv[kv->klen]), value, vlen);
+  kv->vlen = vlen;
 }
 
   inline void
@@ -457,45 +457,28 @@ kv_kptr_c(const struct kv * const kv)
 // }}} ptr
 
 // print {{{
-  static const char *
-kv_pattern(const char c)
-{
-  switch (c) {
-  case 's': return "%c";
-  case 'x': return " %02hhx";
-  case 'd': return " %03hhu";
-  case 'X': return " %hhx";
-  case 'D': return " %hhu";
-  default: return NULL;
-  }
-}
-
 // cmd "KV" K and V can be 's': string, 'x': hex, 'd': dec, or else for not printing.
-// X and D does not add zeros at the beginning
 // n for newline after kv
   void
 kv_print(const struct kv * const kv, const char * const cmd, FILE * const out)
 {
   debug_assert(cmd);
   const u32 klen = kv->klen;
-  fprintf(out, "#%016lx k[%2u] ", kv->hash, klen);
-  const u32 klim = klen < 128 ? klen : 128;
+  fprintf(out, "#%016lx k[%2u]", kv->hash, klen);
 
-  const char * const kpat = kv_pattern(cmd[0]);
-  for (u32 i = 0; i < klim; i++)
-    fprintf(out, kpat, kv->kv[i]);
-  if (klim < klen)
-    fprintf(out, " ...");
+  switch(cmd[0]) {
+  case 's': fprintf(out, " %.*s", klen, kv->kv); break;
+  case 'x': str_print_hex(out, kv->kv, klen); break;
+  case 'd': str_print_dec(out, kv->kv, klen); break;
+  default: break;
+  }
 
-  const char * const vpat = kv_pattern(cmd[1]);
-  if (vpat) { // may omit value
-    const u32 vlen = kv->vlen;
-    const u32 vlim = vlen < 128 ? vlen : 128;
-    fprintf(out, "  v[%4u] ", vlen);
-    for (u32 i = 0; i < vlim; i++)
-      fprintf(out, vpat, kv->kv[klen + i]);
-    if (vlim < vlen)
-      fprintf(out, " ...");
+  const u32 vlen = kv->vlen;
+  switch (cmd[1]) {
+  case 's': fprintf(out, "  v[%4u] %.*s", vlen, vlen, kv->kv+klen); break;
+  case 'x': fprintf(out, "  v[%4u]", vlen); str_print_hex(out, kv->kv+klen, vlen); break;
+  case 'd': fprintf(out, "  v[%4u]", vlen); str_print_dec(out, kv->kv+klen, vlen); break;
+  default: break;
   }
   if (strchr(cmd, 'n'))
     fprintf(out, "\n");

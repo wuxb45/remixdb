@@ -533,7 +533,8 @@ xdb_do_comp(struct xdb * const xdb, const u64 max_rejsz)
   xdb_unlock(xdb);
 
   // truncate old WAL after the io completion
-  msstz_log(xdb->z, "%s discard wal fd %d sz0 %lu\n", __func__, xdb->wal.fds[1], walsz0);
+  const int logfd = msstz_logfd(xdb->z);
+  logger_printf(logfd, "%s discard wal fd %d sz0 %lu\n", __func__, xdb->wal.fds[1], walsz0);
   ftruncate(xdb->wal.fds[1], 0);
   fdatasync(xdb->wal.fds[1]);
   const double t_sync = time_sec();
@@ -548,9 +549,9 @@ xdb_do_comp(struct xdb * const xdb, const u64 max_rejsz)
   const double comp_ra = (double)sst_read / (double)usr_write;
 
   const u64 mb = 1lu<<20;
-  msstz_log(xdb->z, "%s mtsz %lu walsz %lu write-mb usr %lu wal %lu sst %lu WA %.4lf comp-read-mb %lu RA %.4lf\n",
+  logger_printf(logfd, "%s mtsz %lu walsz %lu write-mb usr %lu wal %lu sst %lu WA %.4lf comp-read-mb %lu RA %.4lf\n",
       __func__, mtsz0, walsz0, usr_write/mb, wal_write/mb, sst_write/mb, sys_wa, sst_read/mb, comp_ra);
-  msstz_log(xdb->z, "%s times-ms total %.3lf prep %.3lf comp %.3lf reinsert %.3lf wait2 %.3lf clean %.3lf sync %.3lf\n",
+  logger_printf(logfd, "%s times-ms total %.3lf prep %.3lf comp %.3lf reinsert %.3lf wait2 %.3lf clean %.3lf sync %.3lf\n",
       __func__, t_clean-t0, t_prep-t0, t_comp-t_prep, t_reinsert-t_comp, t_wait2-t_reinsert, t_clean-t_wait2, t_sync-t_clean);
 }
 
@@ -558,18 +559,19 @@ xdb_do_comp(struct xdb * const xdb, const u64 max_rejsz)
 xdb_compaction_worker(void * const ptr)
 {
   struct xdb * xdb = (typeof(xdb))ptr;
+  const int logfd = msstz_logfd(xdb->z);
   // pin on cpus
   char * env = getenv("XDB_CPU_LIST");
   u32 cpus[XDB_COMP_CONC];
   u32 nr = 0;
   if (env) { // explicit cpu list
-    char ** const tokens = string_tokens(env, ",");
+    char ** const tokens = strtoks(env, ",");
     while ((nr < XDB_COMP_CONC) && tokens[nr]) {
       cpus[nr] = a2u32(tokens[nr]);
       nr++;
     }
     free(tokens);
-    msstz_log(xdb->z, "%s cpus %s\n", __func__, env);
+    logger_printf(logfd, "%s cpus %s\n", __func__, env);
   } else { // auto detection; use the last a few cpus
     u32 cores[64];
     const u32 ncores = process_getaffinity_list(64, cores);
@@ -581,7 +583,7 @@ xdb_compaction_worker(void * const ptr)
       nr = 1;
       cpus[0] = 0;
     }
-    msstz_log(xdb->z, "%s cpus %u first %u (auto)\n", __func__, nr, cpus[0]);
+    logger_printf(logfd, "%s cpus %u first %u (auto)\n", __func__, nr, cpus[0]);
   }
   thread_setaffinity_list(nr, cpus);
   thread_set_name(pthread_self(), "xdb_comp");
@@ -597,7 +599,7 @@ xdb_compaction_worker(void * const ptr)
       break;
 
     const u64 dt = time_diff_nsec(t0);
-    msstz_log(xdb->z, "%s compaction worker wait-ms %lu\n", __func__, dt / 1000000);
+    logger_printf(logfd, "%s compaction worker wait-ms %lu\n", __func__, dt / 1000000);
     xdb_do_comp(xdb, xdb->max_rejsz);
   }
 
@@ -718,7 +720,8 @@ xdb_recover_fd(struct xdb * const xdb, const int fd)
   wmt_api->unref(wmt_ref);
   munmap(mem, fsize);
   const u64 rsize = (u64)(iter - mem);
-  msstz_log(xdb->z, "%s fd %d fsize %lu rsize %lu nkeys %lu\n", __func__, fd, fsize, rsize, nkeys);
+  const int logfd = msstz_logfd(xdb->z);
+  logger_printf(logfd, "%s fd %d fsize %lu rsize %lu nkeys %lu\n", __func__, fd, fsize, rsize, nkeys);
   return rsize;
 }
 
@@ -736,18 +739,19 @@ xdb_wal_recover(struct xdb * const xdb)
   const bool two = vs[0] && vs[1]; // both are non-zero
   const u64 v0 = msstz_version(xdb->z);
   debug_assert(v0);
-  msstz_log(xdb->z, "%s wal1 %lu wal2 %lu zv %lu\n", __func__, vs[0], vs[1], v0);
+  const int logfd = msstz_logfd(xdb->z);
+  logger_printf(logfd, "%s wal1 %lu wal2 %lu zv %lu\n", __func__, vs[0], vs[1], v0);
 
   // will recover fds[1] fist, then fds[0] if necessary, then keep using fds[0] since it's probably still half-full
   if (vs[0] < vs[1]) { // swap
-    msstz_log(xdb->z, "%s use wal2 %lu\n", __func__, vs[1]);
+    logger_printf(logfd, "%s use wal2 %lu\n", __func__, vs[1]);
     wal->version = vs[1];
     const int fd1 = wal->fds[0];
     wal->fds[0]= wal->fds[1];
     wal->fds[1] = fd1;
     wring_update_fd(wal->wring, wal->fds[0]);
   } else {
-    msstz_log(xdb->z, "%s use wal1 %lu\n", __func__, vs[0]);
+    logger_printf(logfd, "%s use wal1 %lu\n", __func__, vs[0]);
     wal->version = vs[0];
   }
 
@@ -772,7 +776,7 @@ xdb_wal_recover(struct xdb * const xdb)
     memcpy(wal->buf, &v1, sizeof(v1));
     wal->bufoff = sizeof(v1);
     wal->version = v1;
-    msstz_log(xdb->z, "%s wal comp zv0 %lu zv1 %lu rec %lu %lu mtsz %lu fd0 %d\n",
+    logger_printf(logfd, "%s wal comp zv0 %lu zv1 %lu rec %lu %lu mtsz %lu fd0 %d\n",
         __func__, v0, v1, r1, r0, xdb->mtsz, wal->fds[0]);
   } else { // one or no valid logs
     const u64 rsize = xdb_recover_fd(xdb, wal->fds[0]);
@@ -780,7 +784,7 @@ xdb_wal_recover(struct xdb * const xdb)
       memcpy(wal->buf, &v0, sizeof(v0));
       wal->bufoff = sizeof(v0);
       wal->version = v0;
-      msstz_log(xdb->z, "%s wal empty v %lu mtsz %lu fd %d\n", __func__, v0, xdb->mtsz, wal->fds[0]);
+      logger_printf(logfd, "%s wal empty v %lu mtsz %lu fd %d\n", __func__, v0, xdb->mtsz, wal->fds[0]);
     } else { // reuse the existing wal
       // only one WAL: WAL version <= Z version
       if (wal->version > v0)
@@ -794,7 +798,7 @@ xdb_wal_recover(struct xdb * const xdb)
         pwrite(wal->fds[0], zeroes, nr, (off_t)rsize);
         fdatasync(wal->fds[0]);
       }
-      msstz_log(xdb->z, "%s wal rsize %lu woff %lu mtsz %lu fd %d\n", __func__, rsize, wal->woff, xdb->mtsz, wal->fds[0]);
+      logger_printf(logfd, "%s wal rsize %lu woff %lu mtsz %lu fd %d\n", __func__, rsize, wal->woff, xdb->mtsz, wal->fds[0]);
     }
     ftruncate(wal->fds[1], 0); // truncate the second wal anyway
     fdatasync(wal->fds[1]);

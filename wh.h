@@ -234,16 +234,16 @@ wormhole_split_at(struct wormref * const ref, const struct kref * const key);
 wormhole_sync_at(struct wormref * const ref, const struct kref * const key);
 
   extern void
-wormhole_print_meta_anchors(struct wormhole * const map, const char * const pattern);
+wormhole_print_meta_anchors(struct wormhole * const map);
 
   extern void
-wormhole_print_leaf_anchors(struct wormhole * const map, const char * const pattern);
+wormhole_print_leaf_anchors(struct wormhole * const map, const bool use_hex);
 
   extern void
-wormhole_print_meta_lrmost(struct wormhole * const map, const char * const pattern);
+wormhole_print_meta_lrmost(struct wormhole * const map);
 
   extern void
-wormhole_print_leaf_keys(struct wormhole * const map, const char * const pattern);
+wormhole_print_leaf_keys(struct wormhole * const map, const bool use_hex);
 
   extern void *
 wormhole_jump_leaf_only(struct wormhole * const map, const struct kref * const key);

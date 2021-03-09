@@ -507,10 +507,17 @@ u64_to_ptr(const u64 v);
 ptr_to_u64(const void * const ptr);
 
   extern size_t
+m_usable_size(void * const ptr);
+
+  extern size_t
 fdsize(const int fd);
 
   extern u32
 memlcp(const u8 * p1, const u8 * p2, const u32 max);
+
+__attribute__ ((format (printf, 2, 3)))
+  extern void
+logger_printf(const int fd, const char * const fmt, ...);
 // }}} misc
 
 // bitmap {{{
@@ -619,19 +626,23 @@ slab_get_nalloc(struct slab * const slab);
 slab_destroy(struct slab * const slab);
 // }}}  slab
 
-// mpool {{{
-  extern struct mpool *
-mpool_create(void);
-
-  extern void
-mpool_destroy(struct mpool * const mp);
+// arena {{{
+// thread-safe small-object arena; caller must provide the exact object size to arena_free()
+  extern struct arena *
+arena_create(const u64 nr_ranks, const u64 blk_size);
 
   extern void *
-mpool_alloc(struct mpool * const mp, const size_t sz);
+arena_alloc(struct arena * const a, const size_t size);
 
   extern void
-mpool_free(struct mpool * const mp, void * const ptr);
-// }}} mpool
+arena_free(struct arena * const a, void * const ptr, const size_t size);
+
+  extern void
+arena_clean(struct arena * const a);
+
+  extern void
+arena_destroy(struct arena * const a);
+// }}} arena
 
 // qsort {{{
   extern int
@@ -747,9 +758,18 @@ a2s64(const void * const str);
   extern s32
 a2s32(const void * const str);
 
-// user should free returned ptr after use
+  extern void
+str_print_hex(FILE * const out, const void * const data, const u32 len);
+
+  extern void
+str_print_dec(FILE * const out, const void * const data, const u32 len);
+
+// user should free returned ptr (and nothing else) after use
   extern char **
-string_tokens(const char * const str, const char * const delim);
+strtoks(const char * const str, const char * const delim);
+
+  extern u32
+strtoks_count(const char * const * const toks);
 // }}} string
 
 // damp {{{

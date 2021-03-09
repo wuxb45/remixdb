@@ -147,6 +147,9 @@ rcache_retain(struct rcache * const c, const void * const buf);
   extern void
 rcache_release(struct rcache * const c, const void * const buf);
 
+  extern void
+rcache_thread_stat_reset(void);
+
   extern u64
 rcache_thread_stat_reads(void);
 // }}} rcache

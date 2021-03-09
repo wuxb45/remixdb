@@ -1084,6 +1084,12 @@ rcache_release(struct rcache * const c, const void * const buf)
   atomic_fetch_sub_explicit(&(g->refcnt[i]), 1, MO_RELEASE);
 }
 
+  inline void
+rcache_thread_stat_reset(void)
+{
+  rcache_stat_reads = 0;
+}
+
   inline u64
 rcache_thread_stat_reads(void)
 {
