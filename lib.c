@@ -73,6 +73,64 @@ gcd64(u64 a, u64 b)
 }
 // }}} math
 
+// random {{{
+// Lehmer's generator is 2x faster than xorshift
+/**
+ * D. H. Lehmer, Mathematical methods in large-scale computing units.
+ * Proceedings of a Second Symposium on Large Scale Digital Calculating
+ * Machinery;
+ * Annals of the Computation Laboratory, Harvard Univ. 26 (1951), pp. 141-146.
+ *
+ * P L'Ecuyer,  Tables of linear congruential generators of different sizes and
+ * good lattice structure. Mathematics of Computation of the American
+ * Mathematical
+ * Society 68.225 (1999): 249-260.
+ */
+struct lehmer_u64 {
+  union {
+    u128 v128;
+    u64 v64[2];
+  };
+};
+
+static __thread struct lehmer_u64 rseed_u128 = {.v64 = {4294967291, 1549556881}};
+
+  static inline u64
+lehmer_u64_next(struct lehmer_u64 * const s)
+{
+  const u64 r = s->v64[1];
+  s->v128 *= 0xda942042e4dd58b5lu;
+  return r;
+}
+
+  static inline void
+lehmer_u64_seed(struct lehmer_u64 * const s, const u64 seed)
+{
+  s->v128 = (((u128)(~seed)) << 64) | (seed | 1);
+  (void)lehmer_u64_next(s);
+}
+
+  inline u64
+random_u64(void)
+{
+  return lehmer_u64_next(&rseed_u128);
+}
+
+  inline void
+srandom_u64(const u64 seed)
+{
+  lehmer_u64_seed(&rseed_u128, seed);
+}
+
+  inline double
+random_double(void)
+{
+  // random between [0.0 - 1.0]
+  const u64 r = random_u64();
+  return ((double)r) * (1.0 / ((double)(~0lu)));
+}
+// }}} random
+
 // timing {{{
   inline u64
 time_nsec(void)
@@ -233,33 +291,23 @@ crc32c_inc_123(const u8 * buf, u32 nr, u32 crc)
   inline u32
 crc32c_inc_x4(const u8 * buf, u32 nr, u32 crc)
 {
-  debug_assert((nr & 3) == 0);
+  //debug_assert((nr & 3) == 0);
+  const u32 nr8 = nr >> 3;
 #pragma nounroll
-  while (nr >= sizeof(u64)) {
-    crc = crc32c_u64(crc, *((u64*)buf));
-    nr -= (u32)sizeof(u64);
-    buf += sizeof(u64);
-  }
-  if (nr)
-    crc = crc32c_u32(crc, *((u32*)buf));
+  for (u32 i = 0; i < nr8; i++)
+    crc = crc32c_u64(crc, ((u64*)buf)[i]);
+
+  if (nr & 4u)
+    crc = crc32c_u32(crc, ((u32*)buf)[nr8<<1]);
   return crc;
 }
 
   u32
 crc32c_inc(const u8 * buf, u32 nr, u32 crc)
 {
-#pragma nounroll
-  while (nr >= sizeof(u64)) {
-    crc = crc32c_u64(crc, *((u64*)buf));
-    nr -= (u32)sizeof(u64);
-    buf += sizeof(u64);
-  }
-  if (nr >= sizeof(u32)) {
-    crc = crc32c_u32(crc, *((u32*)buf));
-    nr -= (u32)sizeof(u32);
-    buf += sizeof(u32);
-  }
-  return nr ? crc32c_inc_123(buf, nr, crc) : crc;
+  crc = crc32c_inc_x4(buf, nr, crc);
+  const u32 nr123 = nr & 3u;
+  return nr123 ? crc32c_inc_123(buf + nr - nr123, nr123, crc) : crc;
 }
 // }}} crc32c
 
@@ -1172,6 +1220,8 @@ mutex_deinit(mutex * const lock)
 // rwdep {{{
 // poor man's lockdep for rwlock
 // per-thread lock list
+// it calls debug_die() when local double-(un)locking is detected
+// cyclic dependencies can be manually identified by looking at the two lists below in gdb
 #ifdef RWDEP
 #define RWDEP_NR ((16))
 __thread const rwlock * rwdep_readers[RWDEP_NR] = {};
@@ -1279,7 +1329,7 @@ rwlock_trylock_read(rwlock * const lock)
     rwdep_lock_read(lock);
     return true;
   } else {
-    atomic_fetch_sub_explicit(pvar, 1, MO_RELEASE);
+    atomic_fetch_sub_explicit(pvar, 1, MO_RELAXED);
     return false;
   }
 }
@@ -1314,7 +1364,7 @@ rwlock_trylock_read_nr(rwlock * const lock, u16 nr)
     }
   } while (nr--);
 
-  atomic_fetch_sub_explicit(pvar, 1, MO_RELEASE);
+  atomic_fetch_sub_explicit(pvar, 1, MO_RELAXED);
   return false;
 }
 
@@ -2108,7 +2158,7 @@ m_usable_size(void * const ptr)
 
 #ifndef HEAPCHECKING
   // valgrind and asan may return unaligned usable size
-  debug_assert((rsz & 0x7lu) == 0);
+  debug_assert((sz & 0x7lu) == 0);
 #endif // HEAPCHECKING
 
   return sz;
@@ -2140,37 +2190,32 @@ fdsize(const int fd)
 }
 
   u32
-memlcp(const u8 * p1, const u8 * p2, const u32 max)
+memlcp(const u8 * const p1, const u8 * const p2, const u32 max)
 {
-  const u32 max64 = max >> 3 << 3;
+  const u32 max64 = max & (~7u);
   u32 clen = 0;
   while (clen < max64) {
-    const u64 v1 = *(const u64 *)p1;
-    const u64 v2 = *(const u64 *)p2;
-    if (v1 != v2)
-      return clen + (u32)(__builtin_ctzl(v1 ^ v2) >> 3);
+    const u64 v1 = *(const u64 *)(p1+clen);
+    const u64 v2 = *(const u64 *)(p2+clen);
+    const u64 x = v1 ^ v2;
+    if (x)
+      return clen + (u32)(__builtin_ctzl(x) >> 3);
 
     clen += sizeof(u64);
-    p1 += sizeof(u64);
-    p2 += sizeof(u64);
   }
 
   if ((clen + sizeof(u32)) <= max) {
-    const u32 v1 = *(const u32 *)p1;
-    const u32 v2 = *(const u32 *)p2;
-    if (v1 != v2)
-      return clen + (u32)(__builtin_ctz(v1 ^ v2) >> 3);
+    const u32 v1 = *(const u32 *)(p1+clen);
+    const u32 v2 = *(const u32 *)(p2+clen);
+    const u32 x = v1 ^ v2;
+    if (x)
+      return clen + (u32)(__builtin_ctz(x) >> 3);
 
     clen += sizeof(u32);
-    p1 += sizeof(u32);
-    p2 += sizeof(u32);
   }
 
-  while ((clen < max) && (*p1 == *p2)) {
+  while ((clen < max) && (p1[clen] == p2[clen]))
     clen++;
-    p1++;
-    p2++;
-  }
   return clen;
 }
 
@@ -2323,121 +2368,6 @@ bitmap_set_all0(struct bitmap * const bm)
 }
 // }}} bitmap
 
-// bloom filter {{{
-struct bf {
-  u64 nr_probe;
-  struct bitmap bitmap;
-};
-
-  struct bf *
-bf_create(const u64 bpk, const u64 nkeys)
-{
-  const u64 nbits = bpk * nkeys;
-  struct bf * const bf = malloc(sizeof(*bf) + (bits_round_up(nbits, 6) >> 3));
-  bf->nr_probe = (u64)(log(2.0) * (double)bpk);
-  bitmap_init(&(bf->bitmap), nbits);
-  return bf;
-}
-
-  static inline u64
-bf_inc(const u64 hash)
-{
-  return bits_rotl_u64(hash, 17);
-}
-
-  void
-bf_add(struct bf * const bf, u64 hash64)
-{
-  u64 t = hash64;
-  const u64 inc = bf_inc(hash64);
-  const u64 bits = bf->bitmap.nbits;
-  for (u64 i = 0; i < bf->nr_probe; i++) {
-    bitmap_set1(&(bf->bitmap), t % bits);
-    t += inc;
-  }
-}
-
-  bool
-bf_test(const struct bf * const bf, u64 hash64)
-{
-  u64 t = hash64;
-  const u64 inc = bf_inc(hash64);
-  const u64 bits = bf->bitmap.nbits;
-  for (u64 i = 0; i < bf->nr_probe; i++) {
-    if (!bitmap_test(&(bf->bitmap), t % bits))
-      return false;
-    t += inc;
-  }
-  return true;
-}
-
-  void
-bf_clean(struct bf * const bf)
-{
-  bitmap_set_all0(&(bf->bitmap));
-}
-
-  void
-bf_destroy(struct bf * const bf)
-{
-  free(bf);
-}
-// }}} bloom filter
-
-// oalloc {{{
-struct oalloc {
-  union {
-    void * mem;
-    void ** ptr;
-  };
-  size_t blksz;
-  size_t curr;
-};
-
-  struct oalloc *
-oalloc_create(const size_t blksz)
-{
-  struct oalloc * const o = malloc(sizeof(*o));
-  o->mem = malloc(blksz);
-  o->blksz = blksz;
-  *(o->ptr) = NULL;
-  o->curr = sizeof(void *);
-  return o;
-}
-
-  void *
-oalloc_alloc(struct oalloc * const o, const size_t size)
-{
-  if ((o->curr + size) <= o->blksz) {
-    void * ret = ((u8 *)o->mem) + o->curr;
-    o->curr += size;
-    return ret;
-  }
-
-  // too large
-  if ((size + sizeof(void *)) > o->blksz)
-    return NULL;
-
-  // need more core
-  void ** const newmem = malloc(o->blksz);
-  *newmem = o->mem;
-  o->ptr = newmem;
-  o->curr = sizeof(void *);
-  return oalloc_alloc(o, size);
-}
-
-  void
-oalloc_destroy(struct oalloc * const o)
-{
-  while (o->mem) {
-    void * const next = *(o->ptr);
-    free(o->mem);
-    o->mem = next;
-  }
-  free(o);
-}
-// }}} oalloc
-
 // astk {{{
 // atomic stack
 struct acell { struct acell * next; };
@@ -2567,7 +2497,6 @@ struct slab {
 };
 static_assert(sizeof(struct slab) == 256, "sizeof(struct slab) != 256");
 
-
   static void
 slab_add(struct slab * const slab, struct acell * const blk, const bool is_safe)
 {
@@ -2639,17 +2568,6 @@ slab_init_internal(struct slab * const slab, const u64 obj_size, const u64 blk_s
   debug_assert(slab->objs_per_slab); // >= 1
   slab->obj0_offset = obj0_offset;
   mutex_init(&(slab->lock));
-}
-
-  static bool
-slab_init(struct slab * const slab, const u64 obj_size, const u64 blk_size)
-{
-  const u64 obj0_offset = slab_check_sizes(obj_size, blk_size);
-  if (!obj0_offset)
-    return false;
-
-  slab_init_internal(slab, obj_size, blk_size, obj0_offset);
-  return true;
 }
 
   struct slab *
@@ -2788,79 +2706,18 @@ slab_destroy(struct slab * const slab)
 }
 // }}} slab
 
-// arena {{{
-struct arena {
-  u64 nr_ranks;
-  u64 padding1[7];
-  struct slab slabs[0];
-};
-
-  static size_t
-arena_rank(const size_t sz)
-{
-  // 0 -> large number
-  // 1..8 -> 0
-  // 9..16 -> 1
-  // 1017..1024 -> 127
-  // 1025..1032 -> 128
-  return (sz - 1) >> 3;
-}
-
-  struct arena *
-arena_create(const u64 nr_ranks, const u64 blk_size)
-{
-  struct arena * const a = yalloc(sizeof(*a) + (sizeof(a->slabs[0]) * nr_ranks));
-  if (!a)
-    return NULL;
-  a->nr_ranks = nr_ranks;
-  for (u64 i = 0; i < nr_ranks; i++)
-    slab_init(&a->slabs[i], (i << 3) + 8, blk_size);
-  return a;
-}
-
-  void *
-arena_alloc(struct arena * const a, const size_t size)
-{
-  const u64 r = arena_rank(size);
-  if (r < a->nr_ranks)
-    return slab_alloc_safe(&a->slabs[r]);
-  else
-    return malloc(size);
-}
-
-  void
-arena_free(struct arena * const a, void * const ptr, const size_t size)
-{
-  const u64 r = arena_rank(size);
-  if (r < a->nr_ranks)
-    slab_free_safe(&a->slabs[r], ptr);
-  else
-    free(ptr);
-}
-
-  void
-arena_clean(struct arena * const a)
-{
-  for (u64 i = 0; i < a->nr_ranks; i++)
-    slab_free_all(&a->slabs[i]);
-}
-
-  void
-arena_destroy(struct arena * const a)
-{
-  for (u64 i = 0; i < a->nr_ranks; i++)
-    slab_deinit(&a->slabs[i]);
-  free(a);
-}
-// }}} arena
-
 // qsort {{{
   int
 compare_u16(const void * const p1, const void * const p2)
 {
   const u16 v1 = *((const u16 *)p1);
   const u16 v2 = *((const u16 *)p2);
-  return (int)((s16)(v1 - v2));
+  if (v1 < v2)
+    return -1;
+  else if (v1 > v2)
+    return 1;
+  else
+    return 0;
 }
 
   inline void
@@ -2892,7 +2749,12 @@ compare_u32(const void * const p1, const void * const p2)
 {
   const u32 v1 = *((const u32 *)p1);
   const u32 v2 = *((const u32 *)p2);
-  return (int)(v1 - v2);
+  if (v1 < v2)
+    return -1;
+  else if (v1 > v2)
+    return 1;
+  else
+    return 0;
 }
 
   inline void
@@ -2924,9 +2786,13 @@ compare_u64(const void * const p1, const void * const p2)
 {
   const u64 v1 = *((const u64 *)p1);
   const u64 v2 = *((const u64 *)p2);
-  const u64 diff = v1 - v2;
-  const int ret = ((int)(diff >> 32)) | __builtin_popcountl(diff);
-  return ret;
+
+  if (v1 < v2)
+    return -1;
+  else if (v1 > v2)
+    return 1;
+  else
+    return 0;
 }
 
   inline void
@@ -3271,1371 +3137,6 @@ strtoks_count(const char * const * const toks)
 }
 // }}} string
 
-// damp {{{
-struct damp {
-  u64 cap;
-  u64 nr; // <= cap
-  u64 nr_added; // +1 every time
-  double sum;
-  double dshort;
-  double dlong;
-  double hist[];
-};
-
-  struct damp *
-damp_create(const u64 cap, const double dshort, const double dlong)
-{
-  struct damp * const d = malloc(sizeof(*d) + (sizeof(d->hist[0]) * cap));
-  d->cap = cap;
-  d->nr = 0;
-  d->nr_added = 0;
-  d->sum = 0.0;
-  d->dshort = dshort;
-  d->dlong = dlong;
-  return d;
-}
-
-  double
-damp_avg(const struct damp * const d)
-{
-  return d->nr_added ? (d->sum / (double)d->nr_added) : 0.0;
-}
-
-// recent avg
-  double
-damp_ravg(const struct damp * const d)
-{
-  double sum = 0.0;
-  for (u64 i = 0; i < d->nr; i++)
-    sum += d->hist[i];
-  const double avg = sum / ((double)d->nr);
-  return avg;
-}
-
-  double
-damp_min(const struct damp * const d)
-{
-  if (d->nr == 0)
-    return 0.0;
-  double min = d->hist[0];
-  for (u64 i = 1; i < d->nr; i++)
-    if (d->hist[i] < min)
-      min = d->hist[i];
-  return min;
-}
-
-  double
-damp_max(const struct damp * const d)
-{
-  if (d->nr == 0)
-    return 0.0;
-  double max = d->hist[0];
-  for (u64 i = 1; i < d->nr; i++)
-    if (d->hist[i] > max)
-      max = d->hist[i];
-  return max;
-}
-
-  void
-damp_add(struct damp * const d, const double v)
-{
-  if (d->nr < d->cap) {
-    d->hist[d->nr] = v;
-    d->nr++;
-  } else { // already full
-    memmove(d->hist, d->hist+1, sizeof(d->hist[0]) * (d->nr-1));
-    d->hist[d->nr-1] = v;
-  }
-  d->nr_added++;
-  d->sum += v;
-}
-
-  bool
-damp_test(struct damp * const d)
-{
-  // short-distance history
-  if (d->nr >= 3) { // at least three times
-    const double v0 = d->hist[d->nr - 1];
-    const double v1 = d->hist[d->nr - 2];
-    const double v2 = d->hist[d->nr - 3];
-    const double dd = v0 * d->dshort;
-    const double d01 = fabs(v1 - v0);
-    const double d02 = fabs(v2 - v0);
-    if (d01 < dd && d02 < dd)
-      return true;
-  }
-
-  // full-distance history
-  if (d->nr == d->cap) {
-    const double avg = damp_ravg(d);
-    const double dev = avg * d->dlong;
-    if (fabs(damp_max(d) - damp_min(d)) < dev)
-      return true;
-  }
-
-  // not too many times
-  return d->nr_added >= (d->cap * 2);
-}
-
-  bool
-damp_add_test(struct damp * const d, const double v)
-{
-  damp_add(d, v);
-  return damp_test(d);
-}
-
-  void
-damp_clean(struct damp * const d)
-{
-  d->nr = 0;
-  d->nr_added = 0;
-  d->sum = 0;
-}
-
-  void
-damp_destroy(struct damp * const d)
-{
-  free(d);
-}
-// }}} damp
-
-// vctr {{{
-struct vctr {
-  size_t nr;
-  union {
-    size_t v;
-    atomic_size_t av;
-  } u[];
-};
-
-  struct vctr *
-vctr_create(const size_t nr)
-{
-  struct vctr * const v = calloc(1, sizeof(*v) + (sizeof(v->u[0]) * nr));
-  v->nr = nr;
-  return v;
-}
-
-  inline size_t
-vctr_size(const struct vctr * const v)
-{
-  return v->nr;
-}
-
-  inline void
-vctr_add(struct vctr * const v, const u64 i, const size_t n)
-{
-  if (i < v->nr)
-    v->u[i].v += n;
-}
-
-  inline void
-vctr_add1(struct vctr * const v, const u64 i)
-{
-  if (i < v->nr)
-    v->u[i].v++;
-}
-
-  inline void
-vctr_add_atomic(struct vctr * const v, const u64 i, const size_t n)
-{
-  if (i < v->nr)
-    (void)atomic_fetch_add_explicit(&(v->u[i].av), n, MO_RELAXED);
-}
-
-  inline void
-vctr_add1_atomic(struct vctr * const v, const u64 i)
-{
-  if (i < v->nr)
-    (void)atomic_fetch_add_explicit(&(v->u[i].av), 1, MO_RELAXED);
-}
-
-  inline void
-vctr_set(struct vctr * const v, const u64 i, const size_t n)
-{
-  if (i < v->nr)
-    v->u[i].v = n;
-}
-
-  size_t
-vctr_get(const struct vctr * const v, const u64 i)
-{
-  return (i < v->nr) ?  v->u[i].v : 0;
-}
-
-  void
-vctr_merge(struct vctr * const to, const struct vctr * const from)
-{
-  const size_t nr = to->nr < from->nr ? to->nr : from->nr;
-  for (u64 i = 0; i < nr; i++)
-    to->u[i].v += from->u[i].v;
-}
-
-  void
-vctr_reset(struct vctr * const v)
-{
-  memset(v->u, 0, sizeof(v->u[0]) * v->nr);
-}
-
-  void
-vctr_destroy(struct vctr * const v)
-{
-  free(v);
-}
-// }}} vctr
-
-// rgen {{{
-
-// struct {{{
-#define GEN_CONST    ((1))
-#define GEN_INCS     ((2))
-#define GEN_INCU     ((3))      // +1
-#define GEN_SKIPS    ((4))
-#define GEN_SKIPU    ((5))      // +n
-#define GEN_DECS     ((6))
-#define GEN_DECU     ((7))      // -1
-#define GEN_EXPO     ((8))      // exponential
-#define GEN_ZIPF     ((9))      // Zipfian, 0 is the most popular.
-#define GEN_XZIPF   ((10))      // ScrambledZipfian. scatters the "popular" items across the itemspace.
-#define GEN_UNIZIPF ((11))      // Uniform + Zipfian (multiple hills)
-#define GEN_ZIPFUNI ((12))      // Zipfian + Uniform (one hill)
-#define GEN_UNIFORM ((13))      // Uniformly distributed in an interval [a,b]
-#define GEN_TRACE32 ((14))      // Read from a trace file with unit of u32.
-#define GEN_LATEST  ((15))      // latest (moving head - zipfian)
-#define GEN_ASYNC  ((255))      // async gen
-
-struct rgen_linear { // 8x4
-  union { au64 ac; u64 uc; };
-  u64 base, mod;
-  union { s64 inc; u64 inc_u64; };
-};
-
-struct rgen_expo { // 8
-  double gamma;
-};
-
-struct rgen_trace32 { // 8x5
-  FILE * fin;
-  u64 idx, avail, bufnr;
-  u32 * buf;
-};
-
-struct rgen_zipfian { // 8x9
-  u64 mod, base;
-  double quick1, mod_d, zetan, alpha, quick2, eta, theta;
-};
-
-struct rgen_uniform { // 8x3
-  u64 base, mod;
-  double mul;
-};
-
-struct rgen_unizipf { // 8x12
-  struct rgen_zipfian zipfian;
-  u64 usize, zsize, base;
-};
-
-struct rgen_xzipfian { // 8x10
-  struct rgen_zipfian zipfian;
-  u64 mul;
-};
-
-struct rgen_latest {
-  struct rgen_zipfian zipfian;
-  au64 head; // ever increasing
-};
-
-#define RGEN_ABUF_NR ((4))
-#define RGEN_ABUF_SZ ((1lu << 30))
-#define RGEN_ABUF_SZ1 ((RGEN_ABUF_SZ / RGEN_ABUF_NR))
-#define RGEN_ABUF_NR1_32 ((RGEN_ABUF_SZ1 / sizeof(u32)))
-#define RGEN_ABUF_NR1_64 ((RGEN_ABUF_SZ1 / sizeof(u64)))
-struct rgen_async {
-  union {
-    u8 * curr;
-    u64 * curr64;
-    u32 * curr32;
-  };
-  union {
-    u8 * guard;
-    u64 * guard64;
-    u32 * guard32;
-  };
-  struct rgen * real_gen;
-  u8 * mem;
-  abool running;
-  u8 reader_id;
-  u8 padding2[2];
-  abool avail[RGEN_ABUF_NR];
-  pthread_t pt;
-};
-
-typedef u64 (*rgen_next_func)(struct rgen * const);
-
-struct rgen {
-  union {
-    struct rgen_linear       linear;
-    struct rgen_expo         expo;
-    struct rgen_trace32      trace32;
-    struct rgen_zipfian      zipfian;
-    struct rgen_uniform      uniform;
-    struct rgen_unizipf      unizipf;
-    struct rgen_xzipfian     xzipfian;
-    struct rgen_latest       latest;
-    struct rgen_async        async;
-  };
-  rgen_next_func next;
-  union { // NULL by default
-    rgen_next_func next_nowait; // async only
-    rgen_next_func next_write; // latest only
-  };
-  u64 min, max;
-  u8 type; // use to be a enum
-  bool unit_u64;
-  bool async_worker; // has an async worker running
-  bool shared; // don't copy in rgen_fork()
-};
-
-  static inline void
-rgen_set_next(struct rgen * const gen, rgen_next_func next)
-{
-  gen->next = next;
-  gen->next_nowait = NULL; // by default next_nowait/next_write = NULL
-}
-// }}} struct
-
-// random {{{
-// Lehmer's generator is 2x faster than xorshift
-/**
- * D. H. Lehmer, Mathematical methods in large-scale computing units.
- * Proceedings of a Second Symposium on Large Scale Digital Calculating
- * Machinery;
- * Annals of the Computation Laboratory, Harvard Univ. 26 (1951), pp. 141-146.
- *
- * P L'Ecuyer,  Tables of linear congruential generators of different sizes and
- * good lattice structure. Mathematics of Computation of the American
- * Mathematical
- * Society 68.225 (1999): 249-260.
- */
-static __thread union {
-  u128 v128;
-  u64 v64[2];
-} rseed_u128 = {.v64 = {4294967291, 1549556881}};
-
-  inline u64
-random_u64(void)
-{
-  const u64 r = rseed_u128.v64[1];
-  rseed_u128.v128 *= 0xda942042e4dd58b5lu;
-  return r;
-}
-
-  inline void
-srandom_u64(const u64 seed)
-{
-  rseed_u128.v128 = (((u128)(~seed)) << 64) | (seed | 1);
-  (void)random_u64();
-}
-
-  inline double
-random_double(void)
-{
-  // random between [0.0 - 1.0]
-  const u64 r = random_u64();
-  return ((double)r) * (1.0 / ((double)(~0lu)));
-}
-// }}} random
-
-// genenators {{{
-
-// simple ones {{{
-  static u64
-gen_constant(struct rgen * const gi)
-{
-  return gi->linear.base;
-}
-
-  struct rgen *
-rgen_new_const(const u64 c)
-{
-  struct rgen * const gi = calloc(1, sizeof(*gi));
-  gi->unit_u64 = c > UINT32_MAX;
-  gi->linear.base = c;
-  gi->type = GEN_CONST;
-  gi->min = gi->max = c;
-  rgen_set_next(gi, gen_constant);
-  gi->shared = true;
-  return gi;
-}
-
-  static u64
-gen_expo(struct rgen * const gi)
-{
-  const double d = - log(random_double()) / gi->expo.gamma;
-  return (u64)d;
-}
-
-  struct rgen *
-rgen_new_expo(const double percentile, const double range)
-{
-  struct rgen * const gi = calloc(1, sizeof(*gi));
-  gi->unit_u64 = true;
-  gi->expo.gamma = - log(1.0 - (percentile/100.0)) / range;
-  gi->type = GEN_EXPO;
-  gi->max = ~0lu;
-  rgen_set_next(gi, gen_expo);
-  gi->shared = true;
-  return gi;
-}
-// }}} simple ones
-
-// linear {{{
-  static struct rgen *
-rgen_new_linear(const u64 min, const u64 max, const s64 inc,
-    const u8 type, rgen_next_func func)
-{
-  if (min > max || inc == INT64_MIN)
-    return NULL;
-  const u64 mod = max - min + 1; // mod == 0 with min=0,max=UINT64_MAX
-  const u64 incu = (u64)((inc >= 0) ? inc : -inc);
-  // incu cannot be too large
-  if (mod && (incu >= mod))
-    return NULL;
-
-  struct rgen * const gi = calloc(1, sizeof(*gi));
-  gi->unit_u64 = max > UINT32_MAX;
-  gi->linear.uc = 0;
-  gi->linear.base = inc >= 0 ? min : max;
-  gi->linear.mod = mod;
-  gi->linear.inc = inc;
-  gi->type = type;
-  gi->min = min;
-  gi->max = max;
-  rgen_set_next(gi, func);
-  return gi;
-}
-
-  static u64
-gen_linear_incs_helper(struct rgen * const gi)
-{
-  u64 v = atomic_fetch_add_explicit(&(gi->linear.ac), 1, MO_RELAXED);
-  const u64 mod = gi->linear.mod;
-  if (mod && (v >= mod)) {
-    do {
-      v -= mod;
-    } while (v >= mod);
-    if (v == 0)
-      atomic_fetch_sub_explicit(&(gi->linear.ac), mod, MO_RELAXED);
-  }
-  return v;
-}
-
-  static u64
-gen_linear_incu_helper(struct rgen * const gi)
-{
-  u64 v = gi->linear.uc++;
-  const u64 mod = gi->linear.mod;
-  if (mod && (v == mod)) {
-    gi->linear.uc -= mod;
-    v = 0;
-  }
-  return v;
-}
-
-  static u64
-gen_incs(struct rgen * const gi)
-{
-  return gi->linear.base + gen_linear_incs_helper(gi);
-}
-
-  struct rgen *
-rgen_new_incs(const u64 min, const u64 max)
-{
-  struct rgen * const gen = rgen_new_linear(min, max, 1, GEN_INCS, gen_incs);
-  gen->shared = true;
-  return gen;
-}
-
-  static u64
-gen_incu(struct rgen * const gi)
-{
-  return gi->linear.base + gen_linear_incu_helper(gi);
-}
-
-  struct rgen *
-rgen_new_incu(const u64 min, const u64 max)
-{
-  return rgen_new_linear(min, max, 1, GEN_INCU, gen_incu);
-}
-
-// skips will produce wrong results when mod is not a power of two and ac overflows
-  static u64
-gen_skips_up(struct rgen * const gi)
-{
-  const u64 v = atomic_fetch_add_explicit(&(gi->linear.ac), gi->linear.inc_u64, MO_RELAXED);
-  const u64 mod = gi->linear.mod;
-  return gi->linear.base + (mod ? (v % mod) : v);
-}
-
-  static u64
-gen_skips_down(struct rgen * const gi)
-{
-  const u64 v = atomic_fetch_sub_explicit(&(gi->linear.ac), gi->linear.inc_u64, MO_RELAXED);
-  const u64 mod = gi->linear.mod;
-  return gi->linear.base - (mod ? (v % mod) : v);
-}
-
-  struct rgen *
-rgen_new_skips(const u64 min, const u64 max, const s64 inc)
-{
-  struct rgen * const gen = rgen_new_linear(min, max, inc, GEN_SKIPS, (inc >= 0) ? gen_skips_up : gen_skips_down);
-  gen->shared = true;
-  return gen;
-}
-
-  static u64
-gen_skipu_up(struct rgen * const gi)
-{
-  const u64 v = gi->linear.uc;
-  const u64 mod = gi->linear.mod;
-  debug_assert((mod == 0) | (v < mod));
-  const u64 v1 = v + gi->linear.inc_u64;
-  gi->linear.uc = (v1 >= mod) ? (v1 - mod) : v1;
-  return gi->linear.base + v;
-}
-
-  static u64
-gen_skipu_down(struct rgen * const gi)
-{
-  const u64 v = gi->linear.uc;
-  const u64 mod = gi->linear.mod;
-  debug_assert((mod == 0) | (v < mod));
-  const u64 v1 = v - gi->linear.inc_u64; // actually +
-  gi->linear.uc = (v1 >= mod) ? (v1 - mod) : v1;
-  return gi->linear.base - v;
-}
-
-  struct rgen *
-rgen_new_skipu(const u64 min, const u64 max, const s64 inc)
-{
-  return rgen_new_linear(min, max, inc, GEN_SKIPU, (inc >= 0) ? gen_skipu_up : gen_skipu_down);
-}
-
-  static u64
-gen_decs(struct rgen * const gi)
-{
-  return gi->linear.base - gen_linear_incs_helper(gi);
-}
-
-  struct rgen *
-rgen_new_decs(const u64 min, const u64 max)
-{
-  struct rgen * const gen = rgen_new_linear(min, max, -1, GEN_DECS, gen_decs);
-  gen->shared = true;
-  return gen;
-}
-
-  static u64
-gen_decu(struct rgen * const gi)
-{
-  return gi->linear.base - gen_linear_incu_helper(gi);
-}
-
-  struct rgen *
-rgen_new_decu(const u64 min, const u64 max)
-{
-  return rgen_new_linear(min, max, -1, GEN_DECU, gen_decu);
-}
-// }}} linear
-
-// uniform {{{
-  static u64
-gen_uniform(struct rgen * const gi)
-{
-  return gi->uniform.base + (u64)(((double)random_u64()) * gi->uniform.mul);
-}
-
-  struct rgen *
-rgen_new_uniform(const u64 min, const u64 max)
-{
-  struct rgen * const gi = calloc(1, sizeof(*gi));
-  gi->unit_u64 = max > UINT32_MAX;
-  gi->uniform.base = min;
-  const u64 mod = max - min + 1;
-  gi->uniform.mod = mod;
-  // 5.4..e-20 * (1 << 64) == 1 - epsilon
-  gi->uniform.mul = ((double)mod) * 5.421010862427521e-20;
-
-  gi->type = GEN_UNIFORM;
-  gi->min = min;
-  gi->max = max;
-  rgen_set_next(gi, gen_uniform);
-  gi->shared = true;
-  return gi;
-}
-// }}} uniform
-
-// zipf {{{
-  static u64
-gen_zipfian(struct rgen * const gi)
-{
-  // simplified: no increamental update
-  const struct rgen_zipfian * const gz = &(gi->zipfian);
-  const double u = random_double();
-  const double uz = u * gz->zetan;
-  if (uz < 1.0)
-    return gz->base;
-  else if (uz < gz->quick1)
-    return gz->base + 1;
-
-  const double x = gz->mod_d * pow((gz->eta * u) + gz->quick2, gz->alpha);
-  const u64 ret = gz->base + (u64)x;
-  return ret;
-}
-
-struct zeta_range_info {
-  au64 seq;
-  u64 nth;
-  u64 start;
-  u64 count;
-  double theta;
-  double sums[0];
-};
-
-  static void *
-zeta_range_worker(void * const ptr)
-{
-  struct zeta_range_info * const zi = (typeof(zi))ptr;
-  const u64 seq = atomic_fetch_add_explicit(&(zi->seq), 1, MO_RELAXED);
-  const u64 start = zi->start;
-  const double theta = zi->theta;
-  const u64 count = zi->count;
-  const u64 nth = zi->nth;
-  double local_sum = 0.0;
-  for (u64 i = seq; i < count; i += nth)
-    local_sum += (1.0 / pow((double)(start + i + 1), theta));
-
-  zi->sums[seq] = local_sum;
-  return NULL;
-}
-
-  static double
-zeta_range(const u64 start, const u64 count, const double theta)
-{
-  const u32 ncores = process_affinity_count();
-  const u32 needed = (u32)((count >> 20) + 1); // 1m per core
-  const u32 nth = needed < ncores ? needed : ncores;
-  double sum = 0.0;
-  debug_assert(nth > 0);
-  const size_t zisize = sizeof(struct zeta_range_info) + (sizeof(double) * nth);
-  struct zeta_range_info * const zi = malloc(zisize);
-  if (zi == NULL) { // fallback
-    for (u64 i = 0; i < count; i++)
-      sum += (1.0 / pow((double)(start + i + 1), theta));
-    return sum;
-  }
-  zi->seq = 0;
-  zi->nth = nth;
-  zi->start = start;
-  zi->count = count;
-  zi->theta = theta;
-  // workers fill sums
-  thread_fork_join(nth, zeta_range_worker, false, zi);
-  for (u64 i = 0; i < nth; i++)
-    sum += zi->sums[i];
-  free(zi);
-  return sum;
-}
-
-static const u64 zetalist_u64[] = {0,
-  0x4040437dd948c1d9lu, 0x4040b8f8009bce85lu, 0x4040fe1121e564d6lu, 0x40412f435698cdf5lu,
-  0x404155852507a510lu, 0x404174d7818477a7lu, 0x40418f5e593bd5a9lu, 0x4041a6614fb930fdlu,
-  0x4041bab40ad5ec98lu, 0x4041cce73d363e24lu, 0x4041dd6239ebabc3lu, 0x4041ec715f5c47belu,
-  0x4041fa4eba083897lu, 0x4042072772fe12bdlu, 0x4042131f5e380b72lu, 0x40421e53630da013lu,
-};
-
-static const double * zetalist_double = (typeof(zetalist_double))zetalist_u64;
-static const u64 zetalist_step = 0x10000000000lu;
-static const u64 zetalist_count = 16;
-
-  static double
-zeta(const u64 n, const double theta)
-{
-  //assert(theta == 0.99);
-  const u64 zlid0 = n / zetalist_step;
-  const u64 zlid = (zlid0 > zetalist_count) ? zetalist_count : zlid0;
-  const double sum0 = zetalist_double[zlid];
-  const u64 start = zlid * zetalist_step;
-  const u64 count = n - start;
-  const double sum1 = zeta_range(start, count, theta);
-  return sum0 + sum1;
-}
-
-  struct rgen *
-rgen_new_zipfian(const u64 min, const u64 max)
-{
-#define ZIPFIAN_CONSTANT ((0.99))  // DONT change this number
-  struct rgen * const gi = calloc(1, sizeof(*gi));
-  gi->unit_u64 = max > UINT32_MAX;
-  struct rgen_zipfian * const gz = &(gi->zipfian);
-
-  const u64 mod = max - min + 1;
-  gz->mod = mod;
-  gz->mod_d = (double)mod;
-  gz->base = min;
-  gz->theta = ZIPFIAN_CONSTANT;
-  gz->quick1 = 1.0 + pow(0.5, gz->theta);
-  const double zeta2theta = zeta(2, ZIPFIAN_CONSTANT);
-  gz->alpha = 1.0 / (1.0 - ZIPFIAN_CONSTANT);
-  const double zetan = zeta(mod, ZIPFIAN_CONSTANT);
-  gz->zetan = zetan;
-  gz->eta = (1.0 - pow(2.0 / (double)mod, 1.0 - ZIPFIAN_CONSTANT)) / (1.0 - (zeta2theta / zetan));
-  gz->quick2 = 1.0 - gz->eta;
-
-  gi->type = GEN_ZIPF;
-  gi->min = min;
-  gi->max = max;
-  rgen_set_next(gi, gen_zipfian);
-  gi->shared = true;
-  return gi;
-#undef ZIPFIAN_CONSTANT
-}
-
-  static u64
-gen_xzipfian(struct rgen * const gi)
-{
-  const u64 z = gen_zipfian(gi);
-  const u64 xz = z * gi->xzipfian.mul;
-  return gi->zipfian.base + (xz % gi->zipfian.mod);
-}
-
-  struct rgen *
-rgen_new_xzipfian(const u64 min, const u64 max)
-{
-  struct rgen * gi = rgen_new_zipfian(min, max);
-  const u64 gold = (gi->zipfian.mod / 21 * 13) | 1;
-  for (u64 mul = gold;; mul += 2) {
-    if (gcd64(mul, gi->zipfian.mod) == 1) {
-      gi->xzipfian.mul = mul;
-      break;
-    }
-  }
-  gi->unit_u64 = max > UINT32_MAX;
-  gi->type = GEN_XZIPF;
-  rgen_set_next(gi, gen_xzipfian);
-  return gi;
-}
-
-  static u64
-gen_unizipf(struct rgen * const gi)
-{
-  // scattered hot spots
-  const u64 z = gen_zipfian(gi);
-  const u64 u = (random_u64() % gi->unizipf.usize) * gi->unizipf.zsize;
-  return gi->unizipf.base + z + u;
-}
-
-  static u64
-gen_zipfuni(struct rgen * const gi)
-{
-  // aggregated hot spots
-  const u64 z = gen_zipfian(gi) * gi->unizipf.usize;
-  const u64 u = random_u64() % gi->unizipf.usize;
-  return gi->unizipf.base + z + u;
-}
-
-  struct rgen *
-rgen_new_unizipf(const u64 min, const u64 max, const u64 ufactor)
-{
-  const u64 nr = max - min + 1;
-  if (ufactor == 1) // covers both special gens
-    return rgen_new_zipfian(min, max);
-  else if ((ufactor == 0) || ((nr / ufactor) <= 1))
-    return rgen_new_uniform(min, max);
-
-  const u64 znr = nr / ufactor;
-  struct rgen * gi = rgen_new_zipfian(0, znr - 1);
-  gi->unit_u64 = max > UINT32_MAX;
-  gi->unizipf.usize = ufactor;
-  gi->unizipf.zsize = nr / ufactor;
-  gi->unizipf.base = min;
-  gi->min = min;
-  gi->max = max;
-  gi->type = GEN_UNIZIPF;
-  rgen_set_next(gi, gen_unizipf);
-  return gi;
-}
-
-  struct rgen *
-rgen_new_zipfuni(const u64 min, const u64 max, const u64 ufactor)
-{
-  struct rgen * const gi = rgen_new_unizipf(min, max, ufactor);
-  gi->type = GEN_ZIPFUNI;
-  rgen_set_next(gi, gen_zipfuni);
-  return gi;
-}
-// }}} zipf
-
-// latest {{{
-  static u64
-gen_latest_read(struct rgen * const gi)
-{
-  const u64 z = gen_zipfian(gi);
-  const u64 head = gi->latest.head;
-  return (head > z) ? (head - z) : 0;
-}
-
-  static u64
-gen_latest_write(struct rgen * const gi)
-{
-  return atomic_fetch_add_explicit(&(gi->latest.head), 1, MO_RELAXED);
-}
-
-  struct rgen *
-rgen_new_latest(const u64 zipf_range)
-{
-  struct rgen * const gen = rgen_new_zipfian(1, zipf_range?(zipf_range):1);
-  gen->type = GEN_LATEST;
-  gen->next = gen_latest_read;
-  gen->next_write = gen_latest_write;
-  gen->min = 0;
-  gen->max = UINT64_MAX;
-  return gen;
-}
-// }}} latest
-
-// trace {{{
-  static u64
-gen_trace32(struct rgen * const gi)
-{
-  struct rgen_trace32 * const pt = &(gi->trace32);
-  if (pt->idx >= pt->avail) {
-    if (feof(pt->fin))
-      rewind(pt->fin);
-    pt->idx = 0;
-    pt->avail = fread(pt->buf, sizeof(u32), pt->bufnr, pt->fin);
-    debug_assert(pt->avail);
-  }
-  const u64 r = pt->buf[pt->idx];
-  pt->idx++;
-  return r;
-}
-
-  struct rgen *
-rgen_new_trace32(const char * const filename, const u64 bufsize)
-{
-  struct rgen * const gi = calloc(1, sizeof(*gi));
-  struct rgen_trace32 * const pt = &(gi->trace32);
-  pt->fin = fopen(filename, "rb");
-  if (pt->fin == NULL) {
-    free(gi);
-    return NULL;
-  }
-  pt->idx = 0;
-  pt->bufnr = bits_round_up(bufsize, 4) / sizeof(u32);
-  pt->buf = malloc(pt->bufnr * sizeof(u32));
-  debug_assert(pt->buf);
-  pt->avail = fread(pt->buf, sizeof(u32), pt->bufnr, pt->fin);
-  if (pt->avail == 0) {
-    free(gi);
-    return NULL;
-  }
-  gi->type = GEN_TRACE32;
-  gi->max = ~0lu;
-  rgen_set_next(gi, gen_trace32);
-  return gi;
-}
-// }}} others
-
-// }}} generators
-
-// rgen helper {{{
-  inline u64
-rgen_min(struct rgen * const gen)
-{
-  return gen->min;
-}
-
-  inline u64
-rgen_max(struct rgen * const gen)
-{
-  return gen->max;
-}
-
-  inline u64
-rgen_next(struct rgen * const gen)
-{
-  return gen->next(gen);
-}
-
-  inline u64
-rgen_next_nowait(struct rgen * const gen)
-{
-  return gen->next_nowait(gen);
-}
-
-  inline u64
-rgen_next_write(struct rgen * const gen)
-{
-  return gen->next_write(gen);
-}
-
-  static void
-rgen_async_clean_buffers(struct rgen_async * const as)
-{
-  if (as->mem) {
-    pages_unmap(as->mem, RGEN_ABUF_SZ);
-    as->mem = NULL;
-  }
-}
-
-  void
-rgen_destroy(struct rgen * const gen)
-{
-  if (gen->type == GEN_ASYNC) {
-    gen->async.running = false;
-    pthread_join(gen->async.pt, NULL);
-    rgen_async_clean_buffers(&gen->async);
-  } else if (gen->type == GEN_TRACE32) {
-    fclose(gen->trace32.fin);
-    free(gen->trace32.buf);
-  }
-  free(gen);
-}
-
-  void
-rgen_helper_message(void)
-{
-  fprintf(stderr, "%s Usage: rgen <type> ...\n", __func__);
-  fprintf(stderr, "%s example: rgen const <value>\n", __func__);
-  fprintf(stderr, "%s example: rgen expo <perc> <range>\n", __func__);
-  fprintf(stderr, "%s example: rgen uniform <min> <max>\n", __func__);
-  fprintf(stderr, "%s example: rgen zipfian <min> <max>\n", __func__);
-  fprintf(stderr, "%s example: rgen xzipfian <min> <max>\n", __func__);
-  fprintf(stderr, "%s example: rgen unizipf <min> <max> <ufactor>\n", __func__);
-  fprintf(stderr, "%s example: rgen zipfuni <min> <max> <ufactor>\n", __func__);
-  fprintf(stderr, "%s example: rgen latest <zipf-range>\n", __func__);
-  fprintf(stderr, "%s example: rgen incs <min> <max>\n", __func__);
-  fprintf(stderr, "%s example: rgen incu <min> <max>\n", __func__);
-  fprintf(stderr, "%s example: rgen decs <min> <max>\n", __func__);
-  fprintf(stderr, "%s example: rgen decu <min> <max>\n", __func__);
-  fprintf(stderr, "%s example: rgen skips <min> <max> <inc>\n", __func__);
-  fprintf(stderr, "%s example: rgen skipu <min> <max> <inc>\n", __func__);
-  fprintf(stderr, "%s example: rgen trace32 <filename> <bufsize>\n", __func__);
-}
-
-  int
-rgen_helper(const int argc, char ** const argv, struct rgen ** const gen_out)
-{
-  if ((argc < 1) || (strcmp("rgen", argv[0]) != 0))
-    return -1;
-
-  if ((0 == strcmp(argv[1], "const")) && (argc >= 3)) {
-    *gen_out = rgen_new_const(a2u64(argv[2]));
-    return 3;
-  } else if ((0 == strcmp(argv[1], "expo")) && (argc >= 4)) {
-    *gen_out = rgen_new_expo(atof(argv[2]), atof(argv[3]));
-    return 4;
-  } else if ((0 == strcmp(argv[1], "uniform")) && (argc >= 4)) {
-    *gen_out = rgen_new_uniform(a2u64(argv[2]), a2u64(argv[3]));
-    return 4;
-  } else if ((0 == strcmp(argv[1], "zipfian")) && (argc >= 4)) {
-    *gen_out = rgen_new_zipfian(a2u64(argv[2]), a2u64(argv[3]));
-    return 4;
-  } else if ((0 == strcmp(argv[1], "xzipfian")) && (argc >= 4)) {
-    *gen_out = rgen_new_xzipfian(a2u64(argv[2]), a2u64(argv[3]));
-    return 4;
-  } else if ((0 == strcmp(argv[1], "unizipf")) && (argc >= 5)) {
-    *gen_out = rgen_new_unizipf(a2u64(argv[2]), a2u64(argv[3]), a2u64(argv[4]));
-    return 5;
-  } else if ((0 == strcmp(argv[1], "zipfuni")) && (argc >= 5)) {
-    *gen_out = rgen_new_zipfuni(a2u64(argv[2]), a2u64(argv[3]), a2u64(argv[4]));
-    return 5;
-  } else if ((0 == strcmp(argv[1], "latest")) && (argc >= 3)) {
-    *gen_out = rgen_new_latest(a2u64(argv[2]));
-    return 3;
-  } else if ((0 == strcmp(argv[1], "incs")) && (argc >= 4)) {
-    *gen_out = rgen_new_incs(a2u64(argv[2]), a2u64(argv[3]));
-    return 4;
-  } else if ((0 == strcmp(argv[1], "incu")) && (argc >= 4)) {
-    *gen_out = rgen_new_incu(a2u64(argv[2]), a2u64(argv[3]));
-    return 4;
-  } else if ((0 == strcmp(argv[1], "decs")) && (argc >= 4)) {
-    *gen_out = rgen_new_decs(a2u64(argv[2]), a2u64(argv[3]));
-    return 4;
-  } else if ((0 == strcmp(argv[1], "decu")) && (argc >= 4)) {
-    *gen_out = rgen_new_decu(a2u64(argv[2]), a2u64(argv[3]));
-    return 4;
-  } else if ((0 == strcmp(argv[1], "skips")) && (argc >= 5)) {
-    *gen_out = rgen_new_skips(a2u64(argv[2]), a2u64(argv[3]), a2s64(argv[4]));
-    return 5;
-  } else if ((0 == strcmp(argv[1], "skipu")) && (argc >= 5)) {
-    *gen_out = rgen_new_skipu(a2u64(argv[2]), a2u64(argv[3]), a2s64(argv[4]));
-    return 5;
-  } else if ((0 == strcmp(argv[1], "trace32")) && (argc >= 4)) {
-    *gen_out = rgen_new_trace32(argv[2], a2u64(argv[3]));
-    return 4;
-  }
-  return -1;
-}
-// }}} rgen helper
-
-// async {{{
-  static void *
-rgen_async_worker(void * const ptr)
-{
-  struct rgen * const agen = (typeof(agen))ptr;
-  struct rgen_async * const as = &(agen->async);
-  struct rgen * const real_gen = as->real_gen;
-  rgen_next_func real_next = real_gen->next;
-  srandom_u64(time_nsec());
-#pragma nounroll
-  while (true) {
-    for (u64 i = 0; i < RGEN_ABUF_NR; i++) {
-#pragma nounroll
-      while (as->avail[i]) {
-        usleep(1);
-        if (!as->running)
-          return NULL;
-      }
-      if (agen->unit_u64) {
-        u64 * const buf64 = (u64 *)(as->mem + (i * RGEN_ABUF_SZ1));
-        for (u64 j = 0; j < RGEN_ABUF_NR1_64; j++)
-          buf64[j] = real_next(real_gen);
-      } else {
-        u32 * const buf32 = (u32 *)(as->mem + (i * RGEN_ABUF_SZ1));
-        for (u64 j = 0; j < RGEN_ABUF_NR1_32; j++)
-          buf32[j] = (u32)real_next(real_gen);
-      }
-      as->avail[i] = true;
-    }
-  }
-}
-
-  static void
-rgen_async_wait_at(struct rgen * const gen, const u8 id)
-{
-  debug_assert(gen->type == GEN_ASYNC);
-#pragma nounroll
-  while (!gen->async.avail[id])
-    cpu_pause();
-}
-
-  void
-rgen_async_wait(struct rgen * const gen)
-{
-  if (gen->type == GEN_ASYNC)
-    rgen_async_wait_at(gen, gen->async.reader_id);
-}
-
-  void
-rgen_async_wait_all(struct rgen * const gen)
-{
-  if (gen->type == GEN_ASYNC) {
-    for (u32 i = 0; i < 4; i++)
-      rgen_async_wait_at(gen, (u8)i);
-  }
-}
-
-  static inline void
-rgen_async_switch(struct rgen * const gen)
-{
-  struct rgen_async * const as = &(gen->async);
-  as->avail[as->reader_id] = false;
-  as->reader_id = (as->reader_id + 1u) % RGEN_ABUF_NR;
-  as->curr = as->mem + (as->reader_id * RGEN_ABUF_SZ1);
-  as->guard = as->curr + RGEN_ABUF_SZ1;
-}
-
-  static u64
-rgen_async_next_32(struct rgen * const gen)
-{
-  struct rgen_async * const as = &(gen->async);
-  const u64 r = (u64)(*as->curr32);
-  as->curr32++;
-  if (unlikely(as->curr32 == as->guard32)) {
-    rgen_async_switch(gen);
-    rgen_async_wait(gen);
-  }
-  return r;
-}
-
-  static u64
-rgen_async_next_64(struct rgen * const gen)
-{
-  struct rgen_async * const as = &(gen->async);
-  const u64 r = *as->curr64;
-  as->curr64++;
-  if (unlikely(as->curr64 == as->guard64)) {
-    rgen_async_switch(gen);
-    rgen_async_wait(gen);
-  }
-  return r;
-}
-
-  static u64
-rgen_async_next_32_nowait(struct rgen * const gen)
-{
-  struct rgen_async * const as = &(gen->async);
-  const u64 r = (u64)(*as->curr32);
-  as->curr32++;
-  if (unlikely(as->curr32 == as->guard32)) {
-    rgen_async_switch(gen);
-  }
-  return r;
-}
-
-  static u64
-rgen_async_next_64_nowait(struct rgen * const gen)
-{
-  struct rgen_async * const as = &(gen->async);
-  const u64 r = *as->curr64;
-  as->curr64++;
-  if (unlikely(as->curr64 == as->guard64)) {
-    rgen_async_switch(gen);
-  }
-  return r;
-}
-
-  struct rgen *
-rgen_fork(struct rgen * const gen0)
-{
-  if (gen0->type == GEN_ASYNC)
-    return NULL;
-  if (gen0->shared)
-    return gen0;
-
-  struct rgen * const gen = malloc(sizeof(*gen));
-  memcpy(gen, gen0, sizeof(*gen));
-  if (gen->type == GEN_TRACE32) {
-    FILE * const f2 = fdopen(dup(fileno(gen0->trace32.fin)), "rb");
-    gen->trace32.fin = f2;
-    gen->trace32.idx = 0;
-    gen->trace32.avail = 0;
-  }
-  return gen;
-}
-
-  void
-rgen_join(struct rgen * const gen)
-{
-  if (!gen->shared)
-    rgen_destroy(gen);
-}
-
-  static void *
-rgen_async_create_mem_worker(void * const ptr)
-{
-  struct rgen_async * const as = (typeof(as))ptr;
-  size_t sz = 0;
-  as->mem = pages_alloc_best(RGEN_ABUF_SZ, true, &sz);
-  debug_assert(sz == RGEN_ABUF_SZ);
-  return NULL;
-}
-
-  struct rgen *
-rgen_async_create(struct rgen * const gen0, const u32 cpu)
-{
-  if (gen0 == NULL || gen0->type == GEN_ASYNC)
-    return NULL;
-
-  struct rgen * const agen = calloc(1, sizeof(*agen));
-  struct rgen_async * const as = &(agen->async);
-
-  as->real_gen = gen0;
-  pthread_t pt_mem;
-  thread_create_at(cpu, &pt_mem, rgen_async_create_mem_worker, as);
-  pthread_join(pt_mem, NULL);
-  if (as->mem == NULL) {
-    fprintf(stderr, "%s: cannot allocate memory for the async worker\n", __func__);
-    free(agen);
-    return NULL; // insufficient memory
-  }
-
-  as->running = true; // create thread below
-  as->curr = as->mem;
-  as->guard = as->mem + RGEN_ABUF_SZ1;
-  // gen
-  agen->next = gen0->unit_u64 ? rgen_async_next_64 : rgen_async_next_32;
-  agen->next_nowait = gen0->unit_u64 ? rgen_async_next_64_nowait : rgen_async_next_32_nowait;
-  agen->type = GEN_ASYNC;
-  agen->unit_u64 = gen0->unit_u64;
-  agen->min = gen0->min;
-  agen->max = gen0->max;
-
-  // start worker
-  if (thread_create_at(cpu, &(as->pt), rgen_async_worker, agen) == 0) {
-    char thname[32];
-    sprintf(thname, "agen_%u", cpu);
-    thread_set_name(as->pt, thname);
-    gen0->async_worker = true; // deprecated
-    return agen;
-  } else {
-    rgen_async_clean_buffers(as);
-    free(agen);
-    return NULL;
-  }
-}
-// }}} async
-
-// }}} rgen
-
-// multi-rcu {{{
-
-// bits 63 -- 16 value (pointer)
-// bits 15       valid
-// bits 14 -- 0  count (refcount)
-#define RCU_COUNT_MASK   ((0x0000000000007ffflu))
-#define RCU_VALID_MASK   ((0x0000000000008000lu))
-#define RCU_VALUE_MASK   ((0xffffffffffff0000lu))
-#define RCU_VALUE_SHIFT  ((16))
-
-// node {{{
-struct rcu_node {
-  au64 x[8];
-};
-
-  void
-rcu_node_init(struct rcu_node * const node)
-{
-  atomic_store(&(node->x[0]), RCU_VALID_MASK); // valid null pointer
-  atomic_store(&(node->x[1]), RCU_VALUE_MASK); // invalid non-null pointer
-}
-
-  struct rcu_node *
-rcu_node_create(void)
-{
-  struct rcu_node * const node = malloc(sizeof(*node));
-  rcu_node_init(node);
-  return node;
-}
-
-  void *
-rcu_node_ref(struct rcu_node * const node)
-{
-  do {
-    for (u64 i = 0; i < 2; i++) {
-      u64 x = node->x[i];
-      if (x & RCU_VALID_MASK) {
-        if (atomic_compare_exchange_weak(&(node->x[i]), &x, x + 1))
-          return (void *)(x >> RCU_VALUE_SHIFT);
-      }
-    }
-  } while (true);
-}
-
-  void
-rcu_node_unref(struct rcu_node * const node, void * const ptr)
-{
-  for (u64 i = 0; i < 2; i++) {
-    const u64 x = node->x[i];
-    if ((x >> RCU_VALUE_SHIFT) == ((u64)ptr)) {
-      (void)atomic_fetch_sub(&(node->x[i]), 1);
-      return;
-    }
-  }
-  debug_die();
-}
-
-  void
-rcu_node_update(struct rcu_node * const node, void * const ptr)
-{
-  const u64 xx = (((u64)ptr) << RCU_VALUE_SHIFT) | RCU_VALID_MASK;
-  for (u64 i = 0; i < 2; i++) {
-    if ((node->x[i] & RCU_VALID_MASK) == 0) {
-      atomic_store(&(node->x[i]), xx);
-      au64 * const v = &(node->x[1-i]);
-      debug_assert(((*v) >> RCU_VALUE_SHIFT) != ((u64)ptr));
-      (void)atomic_fetch_sub(v, RCU_VALID_MASK);
-#pragma nounroll
-      while (atomic_load(v) & RCU_COUNT_MASK)
-        cpu_pause();
-      return;
-    }
-  }
-  debug_die();
-}
-// }}} node
-
-struct rcu {
-  u64 nr;
-  u64 mask;
-  u64 padding[6];
-  struct rcu_node nodes[];
-};
-
-  void
-rcu_init(struct rcu * const rcu, const u64 nr)
-{
-  rcu->nr = nr;
-  rcu->mask = nr - 1;
-  for (u64 i = 0; i < nr; i++)
-    rcu_node_init(&(rcu->nodes[i]));
-}
-
-  struct rcu *
-rcu_create(const u64 nr)
-{
-  struct rcu * const rcu = yalloc(sizeof(*rcu) + (nr * sizeof(rcu->nodes[0])));
-  rcu_init(rcu, nr);
-  return rcu;
-}
-
-  void *
-rcu_ref(struct rcu * const rcu, const u64 magic)
-{
-  struct rcu_node * const node = &(rcu->nodes[magic & rcu->mask]);
-  return rcu_node_ref(node);
-}
-
-  void
-rcu_unref(struct rcu * const rcu, void * const ptr, const u64 magic)
-{
-  struct rcu_node * const node = &(rcu->nodes[magic & rcu->mask]);
-  rcu_node_unref(node, ptr);
-}
-
-  void
-rcu_update(struct rcu * const rcu, void * const ptr)
-{
-  const u64 xx = (((u64)ptr) << RCU_VALUE_SHIFT) | RCU_VALID_MASK;
-  const u64 nr = rcu->nr;
-  for (u64 i = 0; i < nr; i++) {
-    struct rcu_node * const node = &(rcu->nodes[i]);
-    for (u64 j = 0; j < 2; j++) {
-      if ((node->x[j] & RCU_VALID_MASK) == 0) {
-        // enable node pointer
-        atomic_store(&(node->x[j]), xx);
-        au64 * const v = &(node->x[1-j]);
-        debug_assert(((*v) >> RCU_VALUE_SHIFT) != ((u64)ptr));
-        (void)atomic_fetch_sub(v, RCU_VALID_MASK);
-        break;
-      }
-    }
-  }
-  cpu_cfence();
-  // wait
-  for (u64 i = 0; i < nr; i++) {
-    struct rcu_node * const node = &(rcu->nodes[i]);
-    for (u64 j = 0; j < 2; j++) {
-      const u64 x = node->x[j];
-      if ((x & RCU_VALID_MASK) == 0) {
-        au64 * const v = &(node->x[j]);
-#pragma nounroll
-        while (atomic_load(v) & RCU_COUNT_MASK)
-          cpu_pause();
-        break;
-      }
-    }
-  }
-}
-
-#undef RCU_COUNT_MASK
-#undef RCU_VALID_MASK
-#undef RCU_VALUE_MASK
-#undef RCU_VALUE_SHIFT
-// }}} multi-rcu
-
 // qsbr {{{
 #define QSBR_STATES_NR ((23)) // shard capacity; valid values are 3*8-1 == 23; 5*8-1 == 39; 7*8-1 == 55
 #define QSBR_SHARD_BITS  ((5)) // 2^n shards
@@ -4821,502 +3322,5 @@ qsbr_destroy(struct qsbr * const q)
 #undef QSBR_STATES_NR
 #undef QSBR_BITMAP_NR
 // }}} qsbr
-
-// server {{{
-struct server {
-  int fd;
-  bool running;
-  pthread_t pt;
-  void *(*worker)(void *);
-  void * priv;
-  au64 ncli;
-};
-
-struct server_wi {
-  struct server * server;
-  int fd;
-};
-
-  static void *
-server_master(void * const ptr)
-{
-  const u32 nr_cores0 = process_affinity_count();
-  u32 * const cores = calloc(nr_cores0, sizeof(cores[0]));
-  const u32 nr_cores = process_getaffinity_list(nr_cores0, cores);
-  u32 seq = 0;
-
-  struct server * const server = (typeof(server))ptr;
-  while (server->running) {
-    struct pollfd pfd = {.fd = server->fd, .events = POLLIN};
-    const int rp = poll(&pfd, 1, 50);
-    if (rp == 0)
-      continue;
-    if (rp < 0)
-      break;
-    const int cli = accept(server->fd, NULL, NULL);
-    if (cli < 0) {
-      if (errno == EINTR)
-        continue; // retry
-      else
-        break; // fatal
-    }
-    pthread_t worker;
-    struct server_wi * const wi = malloc(sizeof(*wi));
-    wi->server = server;
-    wi->fd = cli;
-    const int r = thread_create_at(cores[seq], &worker, server->worker, wi);
-    if (r != 0) {
-      close(cli);
-      free(wi);
-      continue;
-    }
-    pthread_detach(worker);
-    server->ncli++;
-    seq++;
-    if (seq >= nr_cores)
-      seq = 0;
-  }
-  free(cores);
-  close(server->fd);
-  // wait for client threads
-  while (server->ncli)
-    usleep(100);
-  return NULL;
-}
-
-  struct server *
-server_create(const char * const host, const char * const port,
-    void * (* worker)(void *), void * const priv)
-{
-  struct addrinfo hint = {.ai_family = AF_INET, .ai_socktype = SOCK_STREAM};
-  struct addrinfo * ai = NULL;
-  if (getaddrinfo(host, port, &hint, &ai))
-    return NULL;
-
-  int fd = socket(ai->ai_family, ai->ai_socktype, ai->ai_protocol);
-  if (fd < 0)
-    goto fail_fd;
-  int reuse = 1; // true
-  setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse));
-  if (bind(fd, ai->ai_addr, ai->ai_addrlen) || listen(fd, 64))
-    goto fail_listen;
-
-  struct server * const server = malloc(sizeof(*server));
-  if (!server)
-    goto fail_listen;
-  server->running = true;
-  server->fd = fd;
-  server->worker = worker;
-  server->priv = priv;
-  server->ncli = 0;
-  if (pthread_create(&(server->pt), NULL, server_master, server))
-    goto fail_th;
-
-  freeaddrinfo(ai);
-  return server;
-
-fail_th:
-  free(server);
-fail_listen:
-  close(fd);
-fail_fd:
-  freeaddrinfo(ai);
-  return NULL;
-}
-
-  void
-server_wait_destroy(struct server * const server)
-{
-  pthread_join(server->pt, NULL);
-  free(server);
-}
-
-  void
-server_kill_destroy(struct server * const server)
-{
-  server->running = false;
-  // the server thread will close fd
-  shutdown(server->fd, SHUT_RDWR);
-  pthread_join(server->pt, NULL);
-  free(server);
-}
-
-  int
-server_worker_fd(struct server_wi * const wi)
-{
-  return wi->fd;
-}
-
-  void *
-server_worker_priv(struct server_wi * const wi)
-{
-  return wi->server->priv;
-}
-
-__attribute__((noreturn))
-  void
-server_worker_exit(struct server_wi * const wi)
-{
-  wi->server->ncli--;
-  close(wi->fd);
-  free(wi);
-  pthread_exit(NULL);
-}
-
-  int
-client_connect(const char * const host, const char * const port)
-{
-  struct addrinfo hint = {.ai_family = AF_INET, .ai_socktype = SOCK_STREAM};
-  struct addrinfo * ai = NULL;
-  if (getaddrinfo(host, port, &hint, &ai) != 0)
-    return -1;
-
-  const int fd = socket(ai->ai_family, ai->ai_socktype, ai->ai_protocol);
-  if (fd < 0) {
-    freeaddrinfo(ai);
-    return -1;
-  }
-  if (connect(fd, ai->ai_addr, ai->ai_addrlen)) {
-    freeaddrinfo(ai);
-    close(fd);
-    return -1;
-  }
-  freeaddrinfo(ai);
-  return fd;
-}
-// }}} server
-
-// forker {{{
-#define FORKER_PAPI_MAX_EVENTS ((14))
-static u64 forker_papi_nr = 0;
-
-#ifdef FORKER_PAPI
-#include <papi.h>
-static int forker_papi_events[FORKER_PAPI_MAX_EVENTS] = {};
-static char ** forker_papi_tokens = NULL;
-__attribute__((constructor))
-  static void
-forker_papi_init(void)
-{
-  PAPI_library_init(PAPI_VER_CURRENT);
-  PAPI_thread_init(pthread_self);
-
-  char ** const tokens = strtoks(getenv("FORKER_PAPI_EVENTS"), ",");
-  if (tokens == NULL)
-    return;
-  u64 nr = 0;
-  while (tokens[nr] && (nr < FORKER_PAPI_MAX_EVENTS)) {
-    if (PAPI_OK == PAPI_event_name_to_code(tokens[nr], &forker_papi_events[nr]))
-      nr++;
-  }
-  forker_papi_nr = nr;
-  forker_papi_tokens = tokens;
-}
-
-__attribute__((destructor))
-  static void
-forker_papi_deinit(void)
-{
-  //PAPI_shutdown(); // even more memory leaks
-  free(forker_papi_tokens);
-}
-
-  static void *
-forker_papi_thread_func(void * const ptr)
-{
-  struct forker_worker_info * const wi = (typeof(wi))ptr;
-  bool papi_ok = false;
-  int es = PAPI_NULL;
-  if (forker_papi_nr && (PAPI_create_eventset(&es) == PAPI_OK)) {
-    if (PAPI_OK == PAPI_add_events(es, forker_papi_events, forker_papi_nr)) {
-      PAPI_start(es);
-      papi_ok = true;
-    } else {
-      PAPI_destroy_eventset(&es);
-    }
-  }
-  void * const ret = wi->thread_func(ptr);
-  if (papi_ok) {
-    u64 v[FORKER_PAPI_MAX_EVENTS];
-    if (PAPI_OK == PAPI_stop(es, (long long *)v))
-      for (u64 i = 0; i < forker_papi_nr; i++)
-        vctr_set(wi->vctr, wi->papi_vctr_base + i, v[i]);
-
-    PAPI_destroy_eventset(&es);
-  }
-  return ret;
-}
-
-  static void
-forker_papi_print(FILE * fout, const struct vctr * const vctr, const u64 base)
-{
-  if (forker_papi_nr == 0)
-    return;
-  const bool use_color = isatty(fileno(fout));
-  if (use_color)
-    fputs(TERMCLR(36), fout);
-  fprintf(fout, "PAPI %lu ", forker_papi_nr);
-  for (u64 i = 0; i < forker_papi_nr; i++)
-    fprintf(fout, "%s %lu ", forker_papi_tokens[i]+5, vctr_get(vctr, base+i));
-  if (use_color)
-    fputs(TERMCLR(0), fout);
-}
-#endif // FORKER_PAPI
-
-  static void
-forker_pass_print(FILE * fout, char ** const pref, int argc, char ** const argv, char * const msg)
-{
-  for (int i = 0; pref[i]; i++)
-    fprintf(fout, "%s ", pref[i]);
-  for (int i = 0; i < argc; i++)
-    fprintf(fout, "%s ", argv[i]);
-
-  const bool use_color = isatty(fileno(fout));
-  if (use_color)
-    fputs(TERMCLR(34), fout);
-  fputs(msg, fout);
-  if (use_color)
-    fputs(TERMCLR(0), fout);
-
-  fflush(fout);
-}
-
-  int
-forker_pass(const int argc, char ** const argv, char ** const pref,
-    struct pass_info * const pi, const int nr_wargs0)
-{
-#define FORKER_GEN_SYNC   ((0))
-  //      FORKER_GEN_WAIT   ((1))
-#define FORKER_GEN_NOWAIT ((2))
-  // pass <nth> <end-type> <magic> <repeat> <rgen_opt> <nr_wargs> ...
-#define PASS_NR_ARGS ((7))
-  if ((argc < PASS_NR_ARGS) || (strcmp(argv[0], "pass") != 0))
-    return -1;
-
-  const u32 c = a2u32(argv[1]);
-  const u32 cc = c ? c : process_affinity_count();
-  const u32 end_type = a2u32(argv[2]);
-  const u64 magic = a2u64(argv[3]);
-  const u32 repeat = a2u32(argv[4]);
-  const u32 rgen_opt = a2u32(argv[5]);
-  const int nr_wargs = atoi(argv[6]);
-  if ((end_type > 1) || (rgen_opt > 2) || (nr_wargs != nr_wargs0))
-    return -1;
-  if (argc < (PASS_NR_ARGS + nr_wargs))
-    return -1;
-
-  const u32 nr_cores = process_affinity_count();
-  u32 cores[CPU_SETSIZE];
-  process_getaffinity_list(nr_cores, cores);
-  struct damp * const damp = damp_create(7, 0.004, 0.05);
-  const char * const ascfg = getenv("FORKER_ASYNC_SHIFT");
-  const u32 async_shift = ascfg ? ((u32)a2s32(ascfg)) : 1;
-
-  char out[1024] = {};
-  // per-worker data
-  struct forker_worker_info ** const wis = (typeof(wis))calloc_2d(cc, sizeof(*wis[0]));
-  for (u32 i = 0; i < cc; i++) {
-    struct forker_worker_info * const wi = wis[i];
-    wi->thread_func = pi->wf;
-    wi->passdata[0] = pi->passdata[0];
-    wi->passdata[1] = pi->passdata[1];
-    wi->gen = rgen_fork(pi->gen0);
-    wi->seed = (i + 73) * 117;
-    wi->end_type = end_type;
-    if (end_type == FORKER_END_COUNT) // else: endtime will be set later
-      wi->end_magic = magic;
-    wi->worker_id = i;
-    wi->conc = cc;
-
-    // user args
-    wi->argc = nr_wargs;
-    wi->argv = argv + PASS_NR_ARGS;
-
-    wi->vctr = vctr_create(pi->vctr_size + forker_papi_nr);
-    wi->papi_vctr_base = pi->vctr_size;
-
-    if (rgen_opt != FORKER_GEN_SYNC) {
-      wi->gen_back = wi->gen;
-      wi->gen = rgen_async_create(wi->gen_back, cores[i % nr_cores] + async_shift);
-      debug_assert(wi->gen);
-    }
-    wi->rgen_next = (rgen_opt == FORKER_GEN_NOWAIT) ? wi->gen->next_nowait : wi->gen->next;
-    // use a different next_write ONLY in one case: sync latest
-    wi->rgen_next_write = (wi->gen->type == GEN_LATEST) ? wi->gen->next_write : wi->rgen_next;
-  }
-
-  bool done = false;
-  FILE * fout[2] = {stdout, stderr};
-  const u32 printnr = (isatty(1) && isatty(2)) ? 1 : 2;
-  struct vctr * const va = vctr_create(pi->vctr_size + forker_papi_nr);
-  struct vctr * const vas = vctr_create(pi->vctr_size + forker_papi_nr);
-  u64 dts = 0;
-  const u64 t0 = time_nsec();
-  // until: repeat times, or done determined by damp
-  for (u32 r = 0; repeat ? (r < repeat) : (done == false); r++) {
-    // prepare
-    const u64 dt1 = time_diff_nsec(t0);
-    for (u32 i = 0; i < cc; i++) {
-      vctr_reset(wis[i]->vctr);
-      rgen_async_wait_all(wis[i]->gen);
-    }
-
-    // set end-time
-    if (end_type == FORKER_END_TIME) {
-      const u64 end_time = time_nsec() + (1000000000lu * magic);
-      for (u32 i = 0; i < cc; i++)
-        wis[i]->end_magic = end_time;
-    }
-
-    const long rs0 = process_get_rss();
-
-    debug_perf_switch();
-#ifdef FORKER_PAPI
-    const u64 dt = thread_fork_join(cc, forker_papi_thread_func, true, (void **)wis);
-#else
-    const u64 dt = thread_fork_join(cc, pi->wf, true, (void **)wis);
-#endif
-    debug_perf_switch();
-    dts += dt;
-    const long rs1 = process_get_rss();
-
-    vctr_reset(va);
-    for (u64 i = 0; i < cc; i++)
-      vctr_merge(va, wis[i]->vctr);
-    vctr_merge(vas, va); // total
-
-    done = pi->af(dt, va, damp, out);
-    for (u32 i = 0; i < printnr; i++) {
-      fprintf(fout[i], "rss_kb %+ld r %u %.2lf %.2lf ", rs1 - rs0, r, ((double)dt1) * 1e-9, ((double)dt) * 1e-9);
-#ifdef FORKER_PAPI
-      forker_papi_print(fout[i], va, pi->vctr_size);
-#endif // FORKER_PAPI
-      forker_pass_print(fout[i], pref, PASS_NR_ARGS + nr_wargs, argv, out);
-    }
-  }
-
-  damp_clean(damp);
-  pi->af(dts, vas, damp, out);
-  for (u32 i = 0; i < printnr; i++) {
-    fprintf(fout[i], "total %.2lf ", ((double)dts) * 1e-9);
-    forker_pass_print(fout[i], pref, PASS_NR_ARGS + nr_wargs, argv, out);
-  }
-
-  // clean up
-  vctr_destroy(va);
-  vctr_destroy(vas);
-  damp_destroy(damp);
-  for (u64 i = 0; i < cc; i++) {
-    if (wis[i]->gen_back) {
-      rgen_destroy(wis[i]->gen); // async
-      rgen_join(wis[i]->gen_back); // real
-    } else {
-      rgen_join(wis[i]->gen); // real
-    }
-    vctr_destroy(wis[i]->vctr);
-  }
-  free(wis);
-
-  // done messages
-  return PASS_NR_ARGS + nr_wargs;
-#undef PASS_NR_ARGS
-#undef FORKER_GEN_SYNC
-#undef FORKER_GEN_NOWAIT
-}
-
-  int
-forker_passes(int argc, char ** argv, char ** const pref0,
-    struct pass_info * const pi, const int nr_wargs0)
-{
-  char * pref[64];
-  int np = 0;
-  while (pref0[np]) {
-    pref[np] = pref0[np];
-    np++;
-  }
-  const int n1 = np;
-
-  const int argc0 = argc;
-  do {
-    struct rgen * gen = NULL;
-    if ((argc < 1) || (strcmp(argv[0], "rgen") != 0))
-      break;
-
-    const int n2 = rgen_helper(argc, argv, &gen);
-    if (n2 < 0)
-      return n2;
-
-    memcpy(&(pref[n1]), argv, sizeof(argv[0]) * (size_t)n2);
-
-    pref[n1 + n2] = NULL;
-    argc -= n2;
-    argv += n2;
-
-    while ((argc > 0) && (strcmp(argv[0], "pass") == 0)) {
-      pi->gen0 = gen;
-      const int n3 = forker_pass(argc, argv, pref, pi, nr_wargs0);
-      if (n3 < 0) {
-        rgen_destroy(gen);
-        return n3;
-      }
-
-      argc -= n3;
-      argv += n3;
-    }
-
-    rgen_destroy(gen);
-  } while (argc > 0);
-  return argc0 - argc;
-}
-
-  void
-forker_passes_message(void)
-{
-  fprintf(stderr, "%s Usage: {rgen ... {pass ...}}\n", __func__);
-  rgen_helper_message();
-  fprintf(stderr, "%s Usage: pass <nth> " TERMCLR(31) "<magic-type>" TERMCLR(0), __func__);
-  fprintf(stderr, " <magic> <repeat> " TERMCLR(34) "<rgen-opt>" TERMCLR(0));
-  fprintf(stderr, " <nr-wargs> [<warg1> <warg2> ...]\n");
-  fprintf(stderr, "%s " TERMCLR(31) "magic-type: 0:time, 1:count" TERMCLR(0) "\n", __func__);
-  fprintf(stderr, "%s repeat: 0:auto\n", __func__);
-  fprintf(stderr, "%s " TERMCLR(34) "rgen-opt: 0:sync, 1:wait, 2:nowait" TERMCLR(0) "\n", __func__);
-#ifdef FORKER_PAPI
-  fprintf(stderr, "Run with FORKER_PAPI_EVENTS=e1,e2,... to use papi. Run papi_avail for available events.\n");
-#else
-  fprintf(stderr, "Compile with FORKER_PAPI=y to enable papi. Don't use papi and perf at the same time.\n");
-#endif
-  fprintf(stderr, "Run with env FORKER_ASYNC_SHIFT=s (default=1) to bind async-workers at core x+s\n");
-}
-
-  bool
-forker_main(int argc, char ** argv, int(*test_func)(const int, char ** const))
-{
-  if (argc < 1)
-    return false;
-
-  // record args
-  for (int i = 0; i < argc; i++)
-    fprintf(stderr, " %s", argv[i]);
-
-  fprintf(stderr, "\n");
-  fflush(stderr);
-
-  while (argc) {
-    if (strcmp(argv[0], "api") != 0) {
-      fprintf(stderr, "%s need `api' keyword to start benchmark\n", __func__);
-      return false;
-    }
-    const int consume = test_func(argc, argv);
-    if (consume < 0)
-      return false;
-
-    debug_assert(consume <= argc);
-    argc -= consume;
-    argv += consume;
-  }
-
-  return true;
-}
-// }}} forker
 
 // vim:fdm=marker

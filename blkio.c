@@ -967,11 +967,13 @@ rcache_pause(void)
   static u32
 rcache_search_victim(struct rcache_group * const g, const u32 i0)
 {
-  u32 imin = i0;
-  u16 cmin = UINT16_MAX;
-  u8 hmin = UINT8_MAX;
   // search unused page
+#pragma nounroll
   do {
+    u32 imin = i0;
+    u16 cmin = UINT16_MAX;
+    u8 hmin = UINT8_MAX;
+#pragma nounroll
     for (u32 k = 0; k < RCACHE_NWAY; k++) {
       const u32 i = (k + i0) & RCACHE_MASK;
       if (g->hist[i] < hmin && atomic_load_explicit(&(g->refcnt[i]), MO_CONSUME) == 0) {
@@ -981,12 +983,9 @@ rcache_search_victim(struct rcache_group * const g, const u32 i0)
         hmin = g->hist[i];
       }
     }
-    if (cmin == 0) { // found a victim
+    if (cmin == 0) // found a victim
       return imin;
-    }
-    // restart search
-    cmin = UINT16_MAX;
-    hmin = UINT8_MAX;
+
     rcache_pause();
   } while (true);
 }
@@ -1022,9 +1021,8 @@ rcache_hit(struct rcache * const c, const u32 tag, const u32 gid, struct rcache_
   const u32 i0 = tag & RCACHE_MASK;
   for (u32 k = 0; k < RCACHE_NWAY; k++) {
     const u32 i = (k + i0) & RCACHE_MASK;
-    if (g->tag[i] == tag) { // hit
+    if (g->tag[i] == tag) // hit
       return rcache_hit_i(c, gid, g, i);
-    }
   }
 #endif
   // still locked
@@ -1045,6 +1043,7 @@ rcache_acquire(struct rcache * const c, const int fd, const u32 pno)
     return ret1;
 
   const u32 iv = rcache_search_victim(g, tag & RCACHE_MASK);
+  debug_assert(g->refcnt[iv] == 0);
 
   void * const pg = rcache_page(c, gid, iv);
   atomic_store_explicit(&(g->refcnt[iv]), 1, MO_RELAXED);

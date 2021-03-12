@@ -1191,6 +1191,7 @@ const struct kvmap_api kvmap_api_xdb = {
   .probe = (void*)xdb_probe,
   .set = (void*)xdb_set,
   .del = (void*)xdb_del,
+  .sync = (void*)xdb_sync,
   .ref = (void*)xdb_ref,
   .unref = (void*)xdb_unref,
   .destroy = (void*)xdb_close,

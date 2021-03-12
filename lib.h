@@ -84,6 +84,17 @@ mhash32(const u32 v);
 gcd64(u64 a, u64 b);
 // }}} math
 
+// random {{{
+  extern u64
+random_u64(void);
+
+  extern void
+srandom_u64(const u64 seed);
+
+  extern double
+random_double(void);
+// }}} random
+
 // timing {{{
   extern u64
 time_nsec(void);
@@ -513,7 +524,7 @@ m_usable_size(void * const ptr);
 fdsize(const int fd);
 
   extern u32
-memlcp(const u8 * p1, const u8 * p2, const u32 max);
+memlcp(const u8 * const p1, const u8 * const p2, const u32 max);
 
 __attribute__ ((format (printf, 2, 3)))
   extern void
@@ -563,38 +574,6 @@ bitmap_set_all1(struct bitmap * const bm);
 bitmap_set_all0(struct bitmap * const bm);
 // }}} bitmap
 
-// bloom filter {{{
-struct bf;
-
-  extern struct bf *
-bf_create(const u64 bpk, const u64 capacity);
-
-  extern void
-bf_add(struct bf * const bf, u64 hash64);
-
-  extern bool
-bf_test(const struct bf * const bf, u64 hash64);
-
-  extern void
-bf_clean(struct bf * const bf);
-
-  extern void
-bf_destroy(struct bf * const bf);
-// }}} bloom filter
-
-// oalloc {{{
-struct oalloc;
-
-  extern struct oalloc *
-oalloc_create(const size_t blksz);
-
-  extern void *
-oalloc_alloc(struct oalloc * const o, const size_t size);
-
-  extern void
-oalloc_destroy(struct oalloc * const o);
-// }}} oalloc
-
 // slab {{{
 struct slab;
 
@@ -625,24 +604,6 @@ slab_get_nalloc(struct slab * const slab);
   extern void
 slab_destroy(struct slab * const slab);
 // }}}  slab
-
-// arena {{{
-// thread-safe small-object arena; caller must provide the exact object size to arena_free()
-  extern struct arena *
-arena_create(const u64 nr_ranks, const u64 blk_size);
-
-  extern void *
-arena_alloc(struct arena * const a, const size_t size);
-
-  extern void
-arena_free(struct arena * const a, void * const ptr, const size_t size);
-
-  extern void
-arena_clean(struct arena * const a);
-
-  extern void
-arena_destroy(struct arena * const a);
-// }}} arena
 
 // qsort {{{
   extern int
@@ -772,187 +733,6 @@ strtoks(const char * const str, const char * const delim);
 strtoks_count(const char * const * const toks);
 // }}} string
 
-// damp {{{
-struct damp;
-
-  extern struct damp *
-damp_create(const u64 cap, const double dshort, const double dlong);
-
-  extern double
-damp_avg(const struct damp * const d);
-
-  extern double
-damp_ravg(const struct damp * const d);
-
-  extern double
-damp_min(const struct damp * const d);
-
-  extern double
-damp_max(const struct damp * const d);
-
-  extern void
-damp_add(struct damp * const d, const double v);
-
-  extern bool
-damp_test(struct damp * const d);
-
-  extern bool
-damp_add_test(struct damp * const d, const double v);
-
-  extern void
-damp_clean(struct damp * const d);
-
-  extern void
-damp_destroy(struct damp * const d);
-// }}} damp
-
-// vctr {{{
-struct vctr;
-
-  extern struct vctr *
-vctr_create(const size_t nr);
-
-  extern size_t
-vctr_size(const struct vctr * const v);
-
-  extern void
-vctr_add(struct vctr * const v, const u64 i, const size_t n);
-
-  extern void
-vctr_add1(struct vctr * const v, const u64 i);
-
-  extern void
-vctr_add_atomic(struct vctr * const v, const u64 i, const size_t n);
-
-  extern void
-vctr_add1_atomic(struct vctr * const v, const u64 i);
-
-  extern void
-vctr_set(struct vctr * const v, const u64 i, const size_t n);
-
-  extern size_t
-vctr_get(const struct vctr * const v, const u64 i);
-
-  extern void
-vctr_merge(struct vctr * const to, const struct vctr * const from);
-
-  extern void
-vctr_reset(struct vctr * const v);
-
-  extern void
-vctr_destroy(struct vctr * const v);
-// }}} vctr
-
-// rgen {{{
-  extern u64
-random_u64(void);
-
-  extern void
-srandom_u64(const u64 seed);
-
-  extern double
-random_double(void);
-
-struct rgen;
-
-typedef u64 (*rgen_next_func)(struct rgen * const);
-
-extern struct rgen * rgen_new_const(const u64 c);
-extern struct rgen * rgen_new_expo(const double percentile, const double range);
-extern struct rgen * rgen_new_incs(const u64 min, const u64 max);
-extern struct rgen * rgen_new_incu(const u64 min, const u64 max);
-extern struct rgen * rgen_new_skips(const u64 min, const u64 max, const s64 inc);
-extern struct rgen * rgen_new_skipu(const u64 min, const u64 max, const s64 inc);
-extern struct rgen * rgen_new_decs(const u64 min, const u64 max);
-extern struct rgen * rgen_new_decu(const u64 min, const u64 max);
-extern struct rgen * rgen_new_zipfian(const u64 min, const u64 max);
-extern struct rgen * rgen_new_xzipfian(const u64 min, const u64 max);
-extern struct rgen * rgen_new_unizipf(const u64 min, const u64 max, const u64 ufactor);
-extern struct rgen * rgen_new_zipfuni(const u64 min, const u64 max, const u64 ufactor);
-extern struct rgen * rgen_new_latest(const u64 zipf_range);
-extern struct rgen * rgen_new_uniform(const u64 min, const u64 max);
-extern struct rgen * rgen_new_trace32(const char * const filename, const u64 bufsize);
-
-  extern u64
-rgen_min(struct rgen * const gen);
-
-  extern u64
-rgen_max(struct rgen * const gen);
-
-  extern u64
-rgen_next(struct rgen * const gen);
-
-// same to next() for regular gen; different only in async rgen
-  extern u64
-rgen_next_nowait(struct rgen * const gen);
-
-  extern u64
-rgen_next_write(struct rgen * const gen);
-
-  extern void
-rgen_destroy(struct rgen * const gen);
-
-  extern void
-rgen_helper_message(void);
-
-  extern int
-rgen_helper(const int argc, char ** const argv, struct rgen ** const gen_out);
-
-  extern void
-rgen_async_wait(struct rgen * const gen);
-
-  extern void
-rgen_async_wait_all(struct rgen * const gen);
-
-  extern struct rgen *
-rgen_fork(struct rgen * const gen0);
-
-  extern void
-rgen_join(struct rgen * const gen);
-
-  extern struct rgen *
-rgen_async_create(struct rgen * const gen0, const u32 cpu);
-// }}} rgen
-
-// multi-rcu {{{
-struct rcu_node;
-
-  extern struct rcu_node *
-rcu_node_create(void);
-
-  extern void
-rcu_node_init(struct rcu_node * const node);
-
-  extern struct rcu_node *
-rcu_node_create(void);
-
-  extern void *
-rcu_node_ref(struct rcu_node * const node);
-
-  extern void
-rcu_node_unref(struct rcu_node * const node, void * const ptr);
-
-  extern void
-rcu_node_update(struct rcu_node * const node, void * const ptr);
-
-struct rcu;
-
-  extern void
-rcu_init(struct rcu * const rcu, const u64 nr);
-
-  extern struct rcu *
-rcu_create(const u64 nr);
-
-  extern void *
-rcu_ref(struct rcu * const rcu, const u64 magic);
-
-  extern void
-rcu_unref(struct rcu * const rcu, void * const ptr, const u64 magic);
-
-  extern void
-rcu_update(struct rcu * const rcu, void * const ptr);
-// }}} multi-rcu
-
 // qsbr {{{
 struct qsbr;
 struct qsbr_ref {
@@ -986,88 +766,6 @@ qsbr_wait(struct qsbr * const q, const u64 target);
   extern void
 qsbr_destroy(struct qsbr * const q);
 // }}} qsbr
-
-// server {{{
-struct server;
-
-struct server_wi;
-
-  extern struct server *
-server_create(const char * const host, const char * const port,
-    void * (* worker)(void *), void * const priv);
-
-// wait and clean up
-  extern void
-server_wait_destroy(struct server * const server);
-
-// kill and clean up
-  extern void
-server_kill_destroy(struct server * const server);
-
-  extern int
-server_worker_fd(struct server_wi * const wi);
-
-  extern void *
-server_worker_priv(struct server_wi * const wi);
-
-  extern void
-server_worker_exit(struct server_wi * const wi);
-
-  extern int
-client_connect(const char * const host, const char * const port);
-// }}} server
-
-// forker {{{
-#define FORKER_END_TIME ((0))
-#define FORKER_END_COUNT ((1))
-typedef bool (*forker_perf_analyze_func)(const u64, const struct vctr *, struct damp *, char *);
-
-typedef void * (*forker_worker_func)(void *);
-
-struct pass_info {
-  struct rgen * gen0;
-  void * passdata[2]; // if not testing kv
-  u64 vctr_size;
-  forker_worker_func wf;
-  forker_perf_analyze_func af;
-};
-
-struct forker_worker_info {
-  struct rgen * gen;
-  rgen_next_func rgen_next;
-  rgen_next_func rgen_next_write; // identical to rgen_next except for sync-latest
-  void * passdata[2]; // if not testing kv
-  void * priv;
-  u32 end_type;
-  u32 padding;
-  u64 end_magic;
-  struct vctr * vctr;
-
-  u64 worker_id; // <= conc
-  struct rgen * gen_back;
-  u32 conc; // number of threads
-  int argc;// user args
-  char ** argv;
-  u64 seed;
-  void * (*thread_func)(void *);
-  // PAPI
-  u64 papi_vctr_base;
-};
-
-  extern int
-forker_pass(const int argc, char ** const argv, char ** const pref,
-    struct pass_info * const pi, const int nr_wargs0);
-
-  extern int
-forker_passes(int argc, char ** argv, char ** const pref0,
-    struct pass_info * const pi, const int nr_wargs0);
-
-  extern void
-forker_passes_message(void);
-
-  extern bool
-forker_main(int argc, char ** argv, int(*test_func)(const int, char ** const));
-// }}} forker
 
 #ifdef __cplusplus
 }
