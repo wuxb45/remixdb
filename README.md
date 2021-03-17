@@ -114,6 +114,7 @@ Run with a 4GB block cache, 4GB MemTables, and a dataset with 32 million KVs (2^
 
 To run with smaller memory footprint (a 256MB block cache, 256MB Memtables, and 1 million KVs):
 
+    $ export XDB_CPU_LIST=4,5,6,7
     $ numactl -C 0,1,2,3 ./xdbtest.out /tmp/xdbtest 256 20 20
 
 This setup consumes up to 850MB memory (RSS) and 1.8GB space in /tmp/xdbtest.
