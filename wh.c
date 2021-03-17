@@ -40,7 +40,7 @@
 // struct {{{
 struct wormmeta {
   struct entry13 k13; // kref+klen
-  struct entry13 l13; // lmost+bitmin+(lmost->klen > meta->klen)
+  struct entry13 l13; // lmost+bitmin+bitmax(lmost->klen > meta->klen)
   struct entry13 r13; // rmost+hash32_lo
   struct entry13 p13; // lmost->prev+hash32_hi
   u64 bitmap[WH_BMNR];
@@ -138,10 +138,34 @@ wormmeta_keyref_load(const struct wormmeta * const meta)
   return u64_to_ptr(meta->k13.e3);
 }
 
+  static inline u16
+wormmeta_klen_load(const struct wormmeta * const meta)
+{
+  return meta->k13.e1;
+}
+
   static inline struct wormleaf *
 wormmeta_lmost_load(const struct wormmeta * const meta)
 {
-  return u64_to_ptr(meta->l13.e3);
+  return u64_to_ptr(meta->l13.e3 & (~3lu));
+}
+
+  static inline u32
+wormmeta_bitmin_load(const struct wormmeta * const meta)
+{
+  return (u32)(meta->l13.v64 & 0x1fflu);
+}
+
+  static inline u32
+wormmeta_bitmax_load(const struct wormmeta * const meta)
+{
+  return (u32)((meta->l13.v64 >> 9) & 0x1fflu);
+}
+
+  static inline u32
+wormmeta_hash32_load(const struct wormmeta * const meta)
+{
+  return ((u32)meta->r13.e1) | (((u32)meta->p13.e1) << 16);
 }
 
   static inline struct wormleaf *
@@ -151,41 +175,39 @@ wormmeta_rmost_load(const struct wormmeta * const meta)
 }
 
   static inline struct wormleaf *
-wormmeta_lprev_load(const struct wormmeta * const meta)
+wormmeta_lpath_load(const struct wormmeta * const meta)
 {
   return u64_to_ptr(meta->p13.e3);
 }
 
-  static inline u16
-wormmeta_bitmin_load(const struct wormmeta * const meta)
+// internal
+  static inline void
+wormmeta_lpath_store(struct wormmeta * const meta, struct wormleaf * const leaf)
 {
-  return meta->l13.e1 & 0x1ffu;
+  entry13_update_e3(&meta->p13, ptr_to_u64(leaf));
 }
 
-  static inline bool
-wormmeta_leaf_klen_gt(const struct wormmeta * const meta)
-{
-  return (bool)(meta->l13.e1 >> 15);
-}
-
-  static inline u16
-wormmeta_klen_load(const struct wormmeta * const meta)
-{
-  return meta->k13.e1;
-}
-
-  static inline u32
-wormmeta_hash32_load(const struct wormmeta * const meta)
-{
-  return ((u32)meta->r13.e1) | (((u32)meta->p13.e1) << 16);
-}
-
+// also updates leaf_klen_eq and
   static inline void
 wormmeta_lmost_store(struct wormmeta * const meta, struct wormleaf * const leaf)
 {
-  const u16 leaf_klen_gt = (leaf->klen > wormmeta_klen_load(meta)) ? 0x8000u : 0u;
-  const u16 bitmin = wormmeta_bitmin_load(meta);
-  meta->l13 = entry13(bitmin | leaf_klen_gt, ptr_to_u64(leaf));
+  const u64 minmax = meta->l13.v64 & 0x3fffflu;
+  meta->l13.v64 = (((u64)leaf) << 16) | minmax;
+
+  const bool leaf_klen_eq = leaf->klen == wormmeta_klen_load(meta);
+  wormmeta_lpath_store(meta, leaf_klen_eq ? leaf : leaf->prev);
+}
+
+  static inline void
+wormmeta_bitmin_store(struct wormmeta * const meta, const u32 bitmin)
+{
+  meta->l13.v64 = (meta->l13.v64 & (~0x1fflu)) | bitmin;
+}
+
+  static inline void
+wormmeta_bitmax_store(struct wormmeta * const meta, const u32 bitmax)
+{
+  meta->l13.v64 = (meta->l13.v64 & (~0x3fe00lu)) | (bitmax << 9);
 }
 
   static inline void
@@ -195,15 +217,19 @@ wormmeta_rmost_store(struct wormmeta * const meta, struct wormleaf * const leaf)
 }
 
   static inline void
-wormmeta_lprev_store(struct wormmeta * const meta, struct wormleaf * const leaf)
+wormmeta_init(struct wormmeta * const meta, struct wormleaf * const lrmost,
+    struct kv * const keyref, const u32 hash32, const u32 klen)
 {
-  entry13_update_e3(&meta->p13, ptr_to_u64(leaf));
-}
+  keyref->refcnt++; // shared
+  const bool leaf_klen_eq = lrmost->klen == klen;
 
-  static inline void
-wormmeta_bitmin_store(struct wormmeta * const meta, const u16 bitmin)
-{
-  meta->l13.e1 = (meta->l13.e1 & 0x8000u) | (bitmin & 0x1ffu);
+  meta->k13 = entry13((u16)klen, ptr_to_u64(keyref));
+  meta->l13.v64 = (ptr_to_u64(lrmost) << 16) | (WH_FO << 9) | WH_FO;
+  meta->r13 = entry13((u16)hash32, ptr_to_u64(lrmost));
+  meta->p13 = entry13((u16)(hash32 >> 16), ptr_to_u64(leaf_klen_eq ? lrmost : lrmost->prev));
+
+  for (u32 i = 0; i < WH_BMNR; i++)
+    meta->bitmap[i] = 0;
 }
 // }}} meta
 
@@ -238,7 +264,7 @@ wormhole_kref_meta_match(const struct kref * const kref,
 }
 
 // called from meta_down ... get_kref1_slot
-// will must access rmost, prefetching should be useful
+// will access rmost, prefetching is effective here
   static inline bool
 wormhole_kref1_meta_match(const struct kref * const kref,
     const struct wormmeta * const meta, const u8 cid)
@@ -312,20 +338,6 @@ wormhole_alloc_mkey(const size_t klen)
   return malloc(sizeof(struct kv) + klen);
 }
 
-  static struct kv *
-wormhole_alloc_mkey_extend(struct kv * const kv, const u32 klen)
-{
-  struct kv * const mkey = wormhole_alloc_mkey(klen);
-  if (mkey == NULL)
-    return NULL;
-  kv_dup2_key(kv, mkey);
-  if (klen > mkey->klen) {
-    memset(&(mkey->kv[mkey->klen]), 0, klen - mkey->klen);
-    mkey->klen = klen;
-  }
-  return mkey;
-}
-
   static inline void
 wormhole_free_mkey(struct kv * const mkey)
 {
@@ -368,16 +380,7 @@ wormmeta_alloc(struct slab * const slab, struct wormleaf * const lrmost,
   if (meta == NULL)
     return NULL;
 
-  keyref->refcnt++; // shared
-  const u16 leaf_klen_gt = (lrmost->klen > klen) ? 0x8000u : 0u;
-
-  meta->k13 = entry13((u16)klen, ptr_to_u64(keyref));
-  meta->l13 = entry13((u16)WH_FO | leaf_klen_gt, ptr_to_u64(lrmost));
-  meta->r13 = entry13((u16)hash32, ptr_to_u64(lrmost));
-  meta->p13 = entry13((u16)(hash32 >> 16), ptr_to_u64(lrmost->prev));
-
-  for (u32 i = 0; i < WH_BMNR; i++)
-    meta->bitmap[i] = 0;
+  wormmeta_init(meta, lrmost, keyref, hash32, klen);
   return meta;
 }
 
@@ -411,7 +414,7 @@ wormmeta_free(struct slab * const slab, struct wormmeta * const meta)
 }
 // }}} alloc
 
-// meta/bitmap {{{
+// meta-bitmap {{{
   static inline bool
 wormmeta_bm_test(const struct wormmeta * const meta, const u32 id)
 {
@@ -422,10 +425,19 @@ wormmeta_bm_test(const struct wormmeta * const meta, const u32 id)
 wormmeta_bm_set(struct wormmeta * const meta, const u32 id)
 {
   meta->bitmap[id >> 6u] |= (1lu << (id & 0x3fu));
+
+  // min
   if (id < wormmeta_bitmin_load(meta))
-    wormmeta_bitmin_store(meta, (u16)id);
+    wormmeta_bitmin_store(meta, id);
+
+  // max
+  const u32 oldmax = wormmeta_bitmax_load(meta);
+  if (oldmax == WH_FO || id > oldmax)
+    wormmeta_bitmax_store(meta, id);
 }
 
+// find the lowest bit > id0
+// return WH_FO if not found
   static inline u32
 wormmeta_bm_gt(const struct wormmeta * const meta, const u32 id0)
 {
@@ -440,16 +452,6 @@ wormmeta_bm_gt(const struct wormmeta * const meta, const u32 id0)
       return (ix << 6) + (u32)(__builtin_ctzl(meta->bitmap[ix]));
 
   return WH_FO;
-}
-
-  static inline void
-wormmeta_bm_clear(struct wormmeta * const meta, const u32 id)
-{
-  meta->bitmap[id >> 6u] &= (~(1lu << (id & 0x3fu)));
-  if (id == wormmeta_bitmin_load(meta)) {
-    wormmeta_bitmin_store(meta, (u16)wormmeta_bm_gt(meta, id));
-    debug_assert(wormmeta_bitmin_load(meta) > id);
-  }
 }
 
 // find the highest bit that is lower than the id0
@@ -470,7 +472,25 @@ wormmeta_bm_lt(const struct wormmeta * const meta, const u32 id0)
 
   return id0;
 }
-// }}} meta/bitmap
+
+  static inline void
+wormmeta_bm_clear(struct wormmeta * const meta, const u32 id)
+{
+  meta->bitmap[id >> 6u] &= (~(1lu << (id & 0x3fu)));
+
+  // min
+  if (id == wormmeta_bitmin_load(meta)) {
+    wormmeta_bitmin_store(meta, wormmeta_bm_gt(meta, id));
+    debug_assert(wormmeta_bitmin_load(meta) > id);
+  }
+
+  // max
+  if (id == wormmeta_bitmax_load(meta)) {
+    const u32 max = wormmeta_bm_lt(meta, id);
+    wormmeta_bitmax_store(meta, (max == id) ? WH_FO : max);
+  }
+}
+// }}} meta-bitmap
 
 // lock {{{
   static void
@@ -799,7 +819,7 @@ wormhmap_get_kref1_slot(const struct wormhmap * const hmap, const u32 mid,
   while (mask) {
     const u32 i2 = (u32)__builtin_ctz(mask);
     struct wormmeta * const meta = wormhmap_get_meta(hmap, mid, i2>>1);
-    cpu_prefetch0(wormmeta_rmost_load(meta)); // will access
+    //cpu_prefetch0(wormmeta_rmost_load(meta)); // will access
     if (likely(wormhole_kref1_meta_match(kref, meta, cid)))
       return meta;
 
@@ -1138,11 +1158,12 @@ whunsafe_create(const struct kvmap_mm * const mm)
 // }}} create
 
 // jump {{{
+
+// lcp {{{
 // search in the hash table for the Longest Prefix Match of the search key
 // The corresponding wormmeta node is returned and the LPM is recorded in kref
   static inline struct wormmeta *
-wormhole_meta_lcp(const struct wormhmap * const hmap, struct kref * const kref,
-    const u32 klen)
+wormhole_meta_lcp(const struct wormhmap * const hmap, struct kref * const kref, const u32 klen)
 {
   // invariant: lo <= lcp < (lo + gd)
   // ending condition: gd == 1
@@ -1225,7 +1246,6 @@ wormhole_meta_lcp(const struct wormhmap * const hmap, struct kref * const kref,
         gd--;
         ret = NULL;
       } else {
-        gd = 1;
         break;
       }
     } else {
@@ -1243,37 +1263,29 @@ wormhole_meta_lcp(const struct wormhmap * const hmap, struct kref * const kref,
   debug_assert(ret);
   return ret;
 }
+// }}} lcp
 
+// down {{{
   static inline struct wormleaf *
 wormhole_meta_down(const struct wormhmap * const hmap, const struct kref * const lcp,
     const struct wormmeta * const meta, const u32 klen)
 {
-  // the search may observe inconsistency on a leaf's prev/next;
-  // this assertion can fail but it is allowed; the lookup will have to retry later
-  //debug_assert(wormmeta_lprev_load(meta) == wormmeta_lmost_load(meta)->prev);
-
   if (likely(lcp->len < klen)) { // partial match
     const u32 id0 = lcp->ptr[lcp->len];
-    const u16 bitmin = wormmeta_bitmin_load(meta);
-    debug_assert(bitmin != id0);
-    if (bitmin < id0) { // has left-sibling (45%)
-      const u32 id1 = wormmeta_bm_lt(meta, id0);
-      return wormmeta_rmost_load(wormhmap_get_kref1(hmap, lcp, (u8)id1));
-    } else if (bitmin == WH_FO) { // no left-sibling and no right-sibling (45%)
-      return wormmeta_lmost_load(meta);
-    } else { // no left-sibling but has right-sibling (10%, less likely)
-      return wormmeta_lprev_load(meta);
+    if (wormmeta_bitmin_load(meta) > id0) { // no left, don't care about right.
+      return wormmeta_lpath_load(meta);
+    } else if (wormmeta_bitmax_load(meta) < id0) { // has left sibling but no right sibling
+      return wormmeta_rmost_load(meta);
+    } else { // has both (expensive)
+      return wormmeta_rmost_load(wormhmap_get_kref1(hmap, lcp, (u8)wormmeta_bm_lt(meta, id0)));
     }
-  } else { // unlikely(lcp == anchor->klen): full match on the meta tree
-    debug_assert(lcp->len == klen);
-    debug_assert(wormmeta_leaf_klen_gt(meta) == (wormmeta_lmost_load(meta)->klen > lcp->len));
-    if (wormmeta_leaf_klen_gt(meta) == false)
-      return wormmeta_lmost_load(meta);
-    else
-      return wormmeta_lprev_load(meta);
+  } else { // lcp->len == klen
+    return wormmeta_lpath_load(meta);
   }
 }
+// }}} down
 
+// jump-rw {{{
   static struct wormleaf *
 wormhole_jump_leaf(const struct wormhmap * const hmap, const struct kref * const key)
 {
@@ -1337,6 +1349,8 @@ wormhole_jump_leaf_write(struct wormref * const ref, const struct kref * const k
     } while (true);
   } while (true);
 }
+// }}} jump-rw
+
 // }}} jump
 
 // leaf-only read {{{
@@ -1791,36 +1805,13 @@ wormleaf_update(struct wormleaf * const leaf, const u32 ih, const struct kv * co
 // }}} single-leaf modification
 
 // split/merge leaf {{{
-// calculate the minimum anchor-key length for a cut made between k1 and k2
-// return 0 on failure
-  static u32
-wormhole_split_cut_alen(const struct kv * const k1, const struct kv * const k2)
-{
-  const u32 lcp = kv_key_lcp(k1, k2);
-  if (lcp == k1->klen) { // k1 is k2's prefix
-    // no cut if len1 == len2 after removing trailing zeros
-    u32 tklen = k2->klen;
-    while ((tklen > k1->klen) && (k2->kv[tklen-1] == 0))
-      tklen--;
-    if (tklen <= k1->klen)
-      return 0;
-  }
-  // have valid cut
-  u32 alen = lcp + 1;
-  while ((alen < k2->klen) && (k2->kv[alen-1] == 0))
-    alen++;
-  debug_assert(k2->kv[alen-1]);
-  return (alen <= UINT16_MAX) ? alen : 0;
-}
-
 // It only works correctly in cut_search
-// quickly tell if a cut between k1 and k2 can get a specific anchor-key length
+// quickly tell if a cut between k1 and k2 can achieve a specific anchor-key length
   static bool
 wormhole_split_cut_alen_check(const u32 alen, const struct kv * const k1, const struct kv * const k2)
 {
-  const u8 c1 = (k1->klen < alen) ? 0 : k1->kv[alen - 1];
-  const u8 c2 = (k2->klen < alen) ? 0 : k2->kv[alen - 1];
-  return c1 != c2;
+  debug_assert(k2->klen >= alen);
+  return (k1->klen < alen) || (k1->kv[alen - 1] != k2->kv[alen - 1]);
 }
 
 // leaf must have been sorted
@@ -1847,8 +1838,7 @@ wormleaf_kv_at1(const struct wormleaf * const leaf, const u32 i, const u32 is1, 
 // edge cases:
 //   (case 2) is1 == nr_keys: r = nr_keys; ss[r-1]:new
 //   (case 3) is1 == 0, r == 1; new:ss[0]
-// return WH_KPN2 on failure
-// return 1..WH_KPN on success
+// return 1..WH_KPN
   static u32
 wormhole_split_cut_search1(struct wormleaf * const leaf, u32 l, u32 h, const u32 is1, const struct kv * const new)
 {
@@ -1858,9 +1848,7 @@ wormhole_split_cut_search1(struct wormleaf * const leaf, u32 l, u32 h, const u32
 
   const struct kv * const kl0 = wormleaf_kv_at1(leaf, l, is1, new);
   const struct kv * const kh0 = wormleaf_kv_at1(leaf, h, is1, new);
-  const u32 alen = wormhole_split_cut_alen(kl0, kh0);
-  if (alen == 0)
-    return WH_KPN2; // failed
+  const u32 alen = kv_key_lcp(kl0, kh0) + 1;
 
   const u32 target = leaf->next ? WH_MID : WH_KPN_MRG;
   while ((l + 1) < h) {
@@ -1920,20 +1908,13 @@ wormhole_split_leaf_move(struct wormleaf * const leaf1, struct wormleaf * const 
   static struct kv *
 wormhole_split_alloc_anchor(const struct kv * const key1, const struct kv * const key2)
 {
-  // keys are still in leaf1
-  const u32 key2len = key2->klen;
-  u32 alen = kv_key_lcp(key1, key2) + 1;
+  const u32 alen = kv_key_lcp(key1, key2) + 1;
+  debug_assert(alen <= key2->klen);
 
-  // anchor must end with non-zero
-  while ((alen < key2len) && (key2->kv[alen - 1] == 0))
-    alen++;
-  debug_assert(alen <= key2len);
-
-  // now we have the correct alen
-  struct kv * const anchor2 = wormhole_alloc_akey(alen);
-  if (anchor2)
-    kv_refill(anchor2, key2->kv, alen, NULL, 0);
-  return anchor2;
+  struct kv * const anchor = wormhole_alloc_akey(alen);
+  if (anchor)
+    kv_refill(anchor, key2->kv, alen, NULL, 0);
+  return anchor;
 }
 
 // leaf1 is locked
@@ -1946,12 +1927,6 @@ wormhole_split_leaf(struct wormhole * const map, struct wormleaf * const leaf1, 
   kref_ref_kv(&kref_new, new);
   const u32 is1 = wormleaf_bisect_sorted(leaf1, &kref_new); // new should be inserted at [is1]
   const u32 cut = wormhole_split_cut_search1(leaf1, 0, leaf1->nr_keys, is1, new);
-  // check for a corner case that we don't handle for now.
-  // TODO: Implement fat node: a pointer in leaf pointing to extra nodes
-  if (unlikely(cut == WH_KPN2)) {
-    fprintf(stderr, "%s WARNING: Cannot split\n", __func__);
-    return NULL; // insertion failed
-  }
 
   // anchor of leaf2
   debug_assert(cut && (cut <= leaf1->nr_keys));
@@ -2030,54 +2005,19 @@ wormleaf_split_undo(struct wormhole * const map, struct wormleaf * const leaf1,
 // }}} split-merge leaf
 
 // split meta {{{
-// zero-extend an existing node
-  static void
-wormmeta_split_extend(struct wormhmap * const hmap, struct wormmeta * const meta,
-    struct kv * const mkey, struct kv * const mkey2)
-{
-  debug_assert(wormmeta_lmost_load(meta) == wormmeta_rmost_load(meta));
-  debug_assert(wormmeta_klen_load(meta) == mkey->klen);
-  wormmeta_bm_set(meta, 0);
-  const u32 len0 = mkey->klen;
-  struct kv * mkey1 = NULL;
-
-  struct kv * const mkey0 = wormmeta_keyref_load(meta);
-  if (mkey0->klen > len0) { // can reuse keyref of the existing meta node
-    debug_assert(mkey0->kv[len0] == 0);
-    mkey1 = mkey0;
-  } else if (mkey->kv[len0] == 0) {
-    mkey1 = mkey;
-  } else if (mkey2) { // only at the last step
-    debug_assert(mkey2->klen > len0);
-    debug_assert(mkey2->kv[len0] == 0); // should have been prepared
-    mkey1 = mkey2;
-  } else {
-    debug_die();
-  }
-  struct slab * const slab = hmap->slab;
-  struct wormleaf * const lmost = wormmeta_lmost_load(meta);
-  const u32 hash321 = crc32c_u8(mkey->hashlo, 0);
-  const u32 len1 = len0 + 1; // new anchor at +1
-  struct wormmeta * const meta1 = wormmeta_alloc(slab, lmost, mkey1, hash321, len1);
-  debug_assert(meta1);
-  wormhmap_set(hmap, meta1);
-}
-
 // return true if a new node is created
-  static bool
+  static void
 wormmeta_split_touch(struct wormhmap * const hmap, struct kv * const mkey,
-    struct kv * const mkey2, struct wormleaf * const leaf)
+    struct wormleaf * const leaf)
 {
   struct wormmeta * const meta = wormhmap_get(hmap, mkey);
   if (meta) {
-    if (wormmeta_bitmin_load(meta) == WH_FO) // push down leaf
-      wormmeta_split_extend(hmap, meta, mkey, mkey2);
-    wormmeta_bm_set(meta, mkey->kv[mkey->klen]);
+    if (mkey->klen < leaf->klen)
+      wormmeta_bm_set(meta, mkey->kv[mkey->klen]);
     if (wormmeta_lmost_load(meta) == leaf->next)
       wormmeta_lmost_store(meta, leaf);
     else if (wormmeta_rmost_load(meta) == leaf->prev)
       wormmeta_rmost_store(meta, leaf);
-    return false;
   } else { // create new node
     struct slab * const slab = hmap->slab;
     struct wormmeta * const new = wormmeta_alloc(slab, leaf, mkey, mkey->hashlo, mkey->klen);
@@ -2085,40 +2025,35 @@ wormmeta_split_touch(struct wormhmap * const hmap, struct kv * const mkey,
     if (mkey->klen < leaf->klen)
       wormmeta_bm_set(new, mkey->kv[mkey->klen]);
     wormhmap_set(hmap, new);
-    return true;
   }
 }
 
   static void
-wormmeta_lprev_update(struct wormhmap * const hmap, const struct kv * const a1, const struct kv * const a2)
+wormmeta_lpath_update(struct wormhmap * const hmap, const struct kv * const a1, const struct kv * const a2)
 {
   struct kv * const pbuf = hmap->pbuf;
   kv_dup2_key(a2, pbuf);
 
+  // only need to update a2's own branch
   u32 i = kv_key_lcp(a1, a2) + 1;
   debug_assert(i <= pbuf->klen);
   wormhole_prefix(pbuf, i);
-  do {
+  while (i < a2->klen) {
     debug_assert(i <= hmap->maxplen);
     struct wormmeta * const meta = wormhmap_get(hmap, pbuf);
     debug_assert(meta);
-    wormmeta_lprev_store(meta, wormmeta_lmost_load(meta)->prev);
+    wormmeta_lpath_store(meta, wormmeta_lmost_load(meta)->prev);
 
-    if (wormmeta_bitmin_load(meta) == WH_FO)
-      break;
-
-    if (i >= a2->klen)
-      pbuf->kv[i] = 0; // for zero-extended prefixes
     i++;
     wormhole_prefix_inc1(pbuf);
-  } while (true);
+  }
 }
 
 // for leaf1, a leaf2 is already linked at its right side.
 // this function updates the meta-map by moving leaf1 and hooking leaf2 at correct positions
   static void
 wormmeta_split(struct wormhmap * const hmap, struct wormleaf * const leaf,
-    struct kv * const mkey, struct kv * const mkey2)
+    struct kv * const mkey)
 {
   // left branches
   struct wormleaf * const prev = leaf->prev;
@@ -2129,69 +2064,33 @@ wormmeta_split(struct wormhmap * const hmap, struct wormleaf * const leaf,
   const u32 mklen = mkey->klen;
   wormhole_prefix(mkey, i);
   do {
-    const bool rnew = wormmeta_split_touch(hmap, mkey, mkey2, leaf);
-    if ((i >= leaf->klen) && rnew)
+    wormmeta_split_touch(hmap, mkey, leaf);
+    if (i >= leaf->klen)
       break;
     i++;
     wormhole_prefix_inc1(mkey);
-    debug_assert(i < mklen);
   } while (true);
 
   // adjust maxplen; i is the plen of the last _touch()
   if (i > hmap->maxplen)
     hmap->maxplen = i;
-  debug_assert(i < 65520);
+  debug_assert(i <= UINT16_MAX);
 
   // restore klen
   mkey->klen = mklen;
-  if (mkey2)
-    mkey2->klen = mklen; // hash of mkey2 is not required
 
   if (next)
-    wormmeta_lprev_update(hmap, leaf->anchor, next->anchor);
-}
-
-  static struct kv *
-wormhole_split_alloc_mkey(struct wormleaf * const leaf)
-{
-  u32 buflen = leaf->klen;
-  struct wormleaf * const next = leaf->next;
-  if (next && (next->klen > buflen)) { // may need a longer mkey
-    const u32 lcp = kv_key_lcp(leaf->anchor, next->anchor);
-    if (lcp == buflen) { // buflen == leaf->klen
-      while ((buflen < next->klen) && (next->anchor->kv[buflen] == 0))
-        buflen++;
-    }
-  }
-  buflen += 2; // very safe. mkey is long enough for split
-  return wormhole_alloc_mkey_extend(leaf->anchor, buflen);
-}
-
-// we may need to allocate a mkey2 if a1 is a prefix of a2
-// return true if mkey2 should be allocated
-  static bool
-wormhole_split_check_mkey2(const struct wormleaf * const leaf2)
-{
-  const struct kv * const a1 = leaf2->prev->anchor;
-  const struct kv * const a2 = leaf2->anchor;
-  return (a1->klen <= a2->klen) && (!memcmp(a1->kv, a2->kv, a1->klen));
+    wormmeta_lpath_update(hmap, leaf->anchor, next->anchor);
 }
 
 // all locks will be released before returning
   static bool
 wormhole_split_meta(struct wormref * const ref, struct wormleaf * const leaf2)
 {
-  struct kv * const mkey = wormhole_split_alloc_mkey(leaf2);
+  struct kv * const mkey = wormhole_alloc_mkey(leaf2->klen);
   if (mkey == NULL)
     return false;
-  struct kv * mkey2 = NULL;
-  if (wormhole_split_check_mkey2(leaf2)) {
-    mkey2 = wormhole_alloc_mkey_extend(leaf2->prev->anchor, mkey->klen);
-    if (mkey2 == NULL) {
-      wormhole_free_mkey(mkey);
-      return false;
-    }
-  }
+  kv_dup2_key(leaf2->anchor, mkey);
 
   struct wormhole * const map = ref->map;
   // metalock
@@ -2203,7 +2102,6 @@ wormhole_split_meta(struct wormref * const ref, struct wormleaf * const leaf2)
   if (!(sr1 && sr2)) {
     wormhmap_unlock(map);
     wormhole_free_mkey(mkey);
-    wormhole_free_mkey(mkey2);
     return false;
   }
 
@@ -2222,7 +2120,7 @@ wormhole_split_meta(struct wormref * const ref, struct wormleaf * const leaf2)
   wormleaf_version_store(leaf2, v1);
   wormhmap_version_store(hmap1, v1);
 
-  wormmeta_split(hmap1, leaf2, mkey, mkey2);
+  wormmeta_split(hmap1, leaf2, mkey);
 
   qsbr_update(&ref->qref, (u64)hmap1);
 
@@ -2234,14 +2132,12 @@ wormhole_split_meta(struct wormref * const ref, struct wormleaf * const leaf2)
 
   qsbr_wait(map->qsbr, (u64)hmap1);
 
-  wormmeta_split(hmap0, leaf2, mkey, mkey2);
+  wormmeta_split(hmap0, leaf2, mkey);
 
   wormhmap_unlock(map);
 
   if (mkey->refcnt == 0) // this is possible
     wormhole_free_mkey(mkey);
-  if (mkey2 && (mkey2->refcnt == 0)) // this is possible
-    wormhole_free_mkey(mkey2);
   return true;
 }
 
@@ -2270,24 +2166,16 @@ wormhole_split_insert(struct wormref * const ref, struct wormleaf * const leaf1,
   static bool
 whunsafe_split_meta(struct wormhole * const map, struct wormleaf * const leaf2)
 {
-  struct kv * const mkey = wormhole_split_alloc_mkey(leaf2);
+  struct kv * const mkey = wormhole_alloc_mkey(leaf2->klen);
   if (mkey == NULL)
     return false;
-  struct kv * mkey2 = NULL;
-  if (wormhole_split_check_mkey2(leaf2)) {
-    mkey2 = wormhole_alloc_mkey_extend(leaf2->prev->anchor, mkey->klen);
-    if (mkey2 == NULL) {
-      wormhole_free_mkey(mkey);
-      return false;
-    }
-  }
+  kv_dup2_key(leaf2->anchor, mkey);
 
   const bool sr1 = wormhole_slab_reserve(map->hmap2[0].slab, mkey->klen);
   const bool sr2 = wormhole_slab_reserve(map->hmap2[1].slab, mkey->klen);
   if (!(sr1 && sr2)) {
     wormhmap_unlock(map);
     wormhole_free_mkey(mkey);
-    wormhole_free_mkey(mkey2);
     return false;
   }
 
@@ -2298,11 +2186,9 @@ whunsafe_split_meta(struct wormhole * const map, struct wormleaf * const leaf2)
 
   for (u32 i = 0; i < 2; i++)
     if (map->hmap2[i].pmap)
-      wormmeta_split(&(map->hmap2[i]), leaf2, mkey, mkey2);
+      wormmeta_split(&(map->hmap2[i]), leaf2, mkey);
   if (mkey->refcnt == 0) // this is possible
     wormhole_free_mkey(mkey);
-  if (mkey2 && (mkey2->refcnt == 0)) // this is possible
-    wormhole_free_mkey(mkey2);
   return true;
 }
 
@@ -2594,13 +2480,13 @@ wormmeta_merge(struct wormhmap * const hmap, struct wormleaf * const leaf)
     }
 
     if (i >= leaf->klen)
-      pbuf->kv[i] = 0; // for zero-extended prefixes
+      break;
     i++;
     wormhole_prefix_inc1(pbuf);
   } while (true);
 
   if (next)
-    wormmeta_lprev_update(hmap, leaf->anchor, next->anchor);
+    wormmeta_lpath_update(hmap, leaf->anchor, next->anchor);
 }
 
 // all locks (metalock + two leaflock) will be released before returning

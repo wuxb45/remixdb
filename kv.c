@@ -285,8 +285,18 @@ kv_dup2_key_prefix(const struct kv * const from, struct kv * const to, const u32
 // }}} dup
 
 // compare {{{
-// key1 and key2 must be valid ptr
-// kv: key1 is the search key; key2 is the index key that is often not in the cache;
+  static inline int
+klen_compare(const u32 len1, const u32 len2)
+{
+  if (len1 < len2)
+    return -1;
+  else if (len1 > len2)
+    return 1;
+  else
+    return 0;
+}
+
+// compare whether the two keys are identical
   inline bool
 kv_match(const struct kv * const key1, const struct kv * const key2)
 {
@@ -322,7 +332,7 @@ kv_compare(const struct kv * const kv1, const struct kv * const kv2)
 {
   const u32 len = kv1->klen < kv2->klen ? kv1->klen : kv2->klen;
   const int cmp = memcmp(kv1->kv, kv2->kv, (size_t)len);
-  return cmp ? cmp : (((int)kv1->klen) - ((int)kv2->klen));
+  return cmp ? cmp : klen_compare(kv1->klen, kv2->klen);
 }
 
 // for qsort and bsearch
@@ -344,7 +354,7 @@ kv_k128_compare(const struct kv * const sk, const u8 * const k128)
   debug_assert(ptr2);
   const u32 len = (klen1 < klen2) ? klen1 : klen2;
   const int cmp = memcmp(sk->kv, ptr2, len);
-  return cmp ? cmp : (((int)klen1) - ((int)klen2));
+  return cmp ? cmp : klen_compare(klen1, klen2);
 }
 
   int
@@ -357,7 +367,7 @@ kv_kv128_compare(const struct kv * const sk, const u8 * const kv128)
   const u8 * const ptr2 = vi128_decode_u32(vi128_decode_u32(kv128, &klen2), &vlen2);
   const u32 len = (klen1 < klen2) ? klen1 : klen2;
   const int cmp = memcmp(sk->kv, ptr2, len);
-  return cmp ? cmp : (((int)klen1) - ((int)klen2));
+  return cmp ? cmp : klen_compare(klen1, klen2);
 }
 
   inline void
@@ -601,11 +611,9 @@ kref_kv_match(const struct kref * const kref, const struct kv * const k)
   inline int
 kref_compare(const struct kref * const kref1, const struct kref * const kref2)
 {
-  debug_assert(kref1);
-  debug_assert(kref2);
   const u32 len = kref1->len < kref2->len ? kref1->len : kref2->len;
   const int cmp = memcmp(kref1->ptr, kref2->ptr, (size_t)len);
-  return cmp ? cmp : (((int)kref1->len) - ((int)kref2->len));
+  return cmp ? cmp : klen_compare(kref1->len, kref2->len);
 }
 
 // compare a kref and a key
@@ -616,7 +624,7 @@ kref_kv_compare(const struct kref * const kref, const struct kv * const k)
   debug_assert(k);
   const u32 len = kref->len < k->klen ? kref->len : k->klen;
   const int cmp = memcmp(kref->ptr, k->kv, (size_t)len);
-  return cmp ? cmp : (((int)kref->len) - ((int)k->klen));
+  return cmp ? cmp : klen_compare(kref->len, k->klen);
 }
 
   inline u32
@@ -637,7 +645,7 @@ kref_k128_compare(const struct kref * const sk, const u8 * const k128)
   debug_assert(ptr2);
   const u32 len = (klen1 < klen2) ? klen1 : klen2;
   const int cmp = memcmp(sk->ptr, ptr2, len);
-  return cmp ? cmp : (((int)klen1) - ((int)klen2));
+  return cmp ? cmp : klen_compare(klen1, klen2);
 }
 
 // klen, vlen, key, ...
@@ -651,7 +659,7 @@ kref_kv128_compare(const struct kref * const sk, const u8 * const kv128)
   const u8 * const ptr2 = vi128_decode_u32(vi128_decode_u32(kv128, &klen2), &vlen2);
   const u32 len = (klen1 < klen2) ? klen1 : klen2;
   const int cmp = memcmp(sk->ptr, ptr2, len);
-  return cmp ? cmp : (((int)klen1) - ((int)klen2));
+  return cmp ? cmp : klen_compare(klen1, klen2);
 }
 
 static struct kref __kref_null = {.hash32 = KV_CRC32C_SEED};
@@ -708,7 +716,7 @@ kvref_kv_compare(const struct kvref * const ref, const struct kv * const kv)
 {
   const u32 len = ref->hdr.klen < kv->klen ? ref->hdr.klen : kv->klen;
   const int cmp = memcmp(ref->kptr, kv->kv, (size_t)len);
-  return cmp ? cmp : (((int)ref->hdr.klen) - ((int)kv->klen));
+  return cmp ? cmp : klen_compare(ref->hdr.klen, kv->klen);
 }
 // }}} kvref
 

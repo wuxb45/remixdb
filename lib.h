@@ -687,7 +687,7 @@ xlog_iter_create(const struct xlog * const xlog);
   extern bool
 xlog_iter_next(struct xlog_iter * const iter, void * const out);
 // free iter after use
-// }}} ulog/dlog
+// }}} xlog
 
 // string {{{
 // XXX strdec_ and strhex_ functions does not append the trailing '\0' to the output string

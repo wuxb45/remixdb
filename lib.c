@@ -3131,7 +3131,7 @@ strtoks_count(const char * const * const toks)
 {
   if (!toks)
     return 0;
-  int n = 0;
+  u32 n = 0;
   while (toks[n++]);
   return n;
 }

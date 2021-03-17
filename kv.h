@@ -36,30 +36,22 @@ struct kv {
     u64 kvlen;
     struct {
       u32 klen;
-      union {
-        u32 vlen;
-        u32 refcnt;
-      };
+      union { u32 vlen; u32 refcnt; };
     };
   };
   union {
     u64 hash; // hashvalue of the key
     u64 priv; // can hide a value here if hash is not used
     void * privptr;
-    struct {
-      u32 hashlo; // little endian
-      u32 hashhi;
-    };
+    struct { u32 hashlo; u32 hashhi; }; // little endian
+    struct { u32 privlo; u32 privhi; };
   };
   u8 kv[0];  // len(kv) == klen + vlen
 } __attribute__((packed));
 
 struct kref {
   u32 len;
-  union {
-    u32 hash32;
-    u32 priv;
-  };
+  union { u32 hash32; u32 priv; };
   const u8 * ptr;
 } __attribute__((packed));
 
