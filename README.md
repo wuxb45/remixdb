@@ -104,7 +104,7 @@ To compile and run the demo code:
 `xdbtest` is a stress test program that uses the `remixdb_*` functions.
 It trys to use all the available cores on the affinity list, which can lead to mediocre performance.
 You should use numactl to specify what cores are available for the tester threads.
-Suppose you have eight cores (0...7) in total, the best practice is to let the testers to run on the first four cores and assign the last four coures to the compaction threads. The following examples use this configuration.
+Suppose you have eight cores (0...7) in total, the best practice is to let the testers to run on the first four cores and assign the last four cores to the compaction threads. The following examples use this configuration.
 
 Run with a 4GB block cache, 4GB MemTables, and a dataset with 32 million KVs (2^25), performing 1 million updates in each round (2^20):
 
