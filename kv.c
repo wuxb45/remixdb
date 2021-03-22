@@ -474,7 +474,7 @@ kv_print(const struct kv * const kv, const char * const cmd, FILE * const out)
 {
   debug_assert(cmd);
   const u32 klen = kv->klen;
-  fprintf(out, "#%016lx k[%2u]", kv->hash, klen);
+  fprintf(out, "#%016lx k[%3u]", kv->hash, klen);
 
   switch(cmd[0]) {
   case 's': fprintf(out, " %.*s", klen, kv->kv); break;
