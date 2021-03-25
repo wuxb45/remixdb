@@ -174,6 +174,9 @@ kv_qsort(struct kv ** const kvs, const size_t nr);
   extern u32
 kv_key_lcp(const struct kv * const key1, const struct kv * const key2);
 
+  extern u32
+kv_key_lcp_skip(const struct kv * const key1, const struct kv * const key2, const u32 lcp0);
+
   extern void
 kv_psort(struct kv ** const kvs, const u64 nr, const u64 tlo, const u64 thi);
 
@@ -269,6 +272,9 @@ kref_kv_compare(const struct kref * const kref, const struct kv * const k);
 
   extern u32
 kref_lcp(const struct kref * const k1, const struct kref * const k2);
+
+  extern u32
+kref_kv_lcp(const struct kref * const kref, const struct kv * const kv);
 
   extern int
 kref_k128_compare(const struct kref * const sk, const u8 * const k128);

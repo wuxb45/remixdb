@@ -383,6 +383,15 @@ kv_key_lcp(const struct kv * const key1, const struct kv * const key2)
   const u32 max = (key1->klen < key2->klen) ? key1->klen : key2->klen;
   return memlcp(key1->kv, key2->kv, max);
 }
+
+// return the length of longest common prefix of the two keys with a known lcp0
+  inline u32
+kv_key_lcp_skip(const struct kv * const key1, const struct kv * const key2, const u32 lcp0)
+{
+  const u32 max = (key1->klen < key2->klen) ? key1->klen : key2->klen;
+  debug_assert(max >= lcp0);
+  return lcp0 + memlcp(key1->kv+lcp0, key2->kv+lcp0, max-lcp0);
+}
 // }}}
 
 // psort {{{
@@ -632,6 +641,13 @@ kref_lcp(const struct kref * const k1, const struct kref * const k2)
 {
   const u32 max = (k1->len < k2->len) ? k1->len : k2->len;
   return memlcp(k1->ptr, k2->ptr, max);
+}
+
+  inline u32
+kref_kv_lcp(const struct kref * const kref, const struct kv * const kv)
+{
+  const u32 max = (kref->len < kv->klen) ? kref->len : kv->klen;
+  return memlcp(kref->ptr, kv->kv, max);
 }
 
 // klen, key, ...
