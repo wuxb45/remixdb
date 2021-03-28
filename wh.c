@@ -269,21 +269,22 @@ wormmeta_bm_set(struct wormmeta * const meta, const u32 id)
   static inline u32
 wormmeta_bm_gt(const struct wormmeta * const meta, const u32 id0)
 {
-  if ((id0 & 0x3fu) != 0x3fu) { // not at bit 63
-    const u32 id = id0 + 1u;
-    const u64 bits = meta->bitmap[id >> 6] >> (id & 0x3fu);
+  u32 ix = id0 >> 6;
+  u64 bits = meta->bitmap[ix] & ~((1lu << (id0 & 0x3fu)) - 1lu);
+  if (bits)
+    return (ix << 6) + (u32)__builtin_ctzl(bits);
+
+  while (++ix < WH_BMNR) {
+    bits = meta->bitmap[ix];
     if (bits)
-      return id + (u32)__builtin_ctzl(bits);
+      return (ix << 6) + (u32)__builtin_ctzl(bits);
   }
-  for (u32 ix = (id0 >> 6) + 1; ix < 4; ix++)
-    if (meta->bitmap[ix])
-      return (ix << 6) + (u32)(__builtin_ctzl(meta->bitmap[ix]));
 
   return WH_FO;
 }
 
 // find the highest bit that is lower than the id0
-// return id0 if not found
+// return WH_FO if not found
   static inline u32
 wormmeta_bm_lt(const struct wormmeta * const meta, const u32 id0)
 {
@@ -298,7 +299,7 @@ wormmeta_bm_lt(const struct wormmeta * const meta, const u32 id0)
       return (ix << 6) + 63u - (u32)__builtin_clzl(bits);
   }
 
-  return id0;
+  return WH_FO;
 }
 
 // meta must be a full node
@@ -309,16 +310,12 @@ wormmeta_bm_clear(struct wormmeta * const meta, const u32 id)
   meta->bitmap[id >> 6u] &= (~(1lu << (id & 0x3fu)));
 
   // min
-  if (id == wormmeta_bitmin_load(meta)) {
+  if (id == wormmeta_bitmin_load(meta))
     wormmeta_bitmin_store(meta, wormmeta_bm_gt(meta, id));
-    debug_assert(wormmeta_bitmin_load(meta) > id);
-  }
 
   // max
-  if (id == wormmeta_bitmax_load(meta)) {
-    const u32 max = wormmeta_bm_lt(meta, id);
-    wormmeta_bitmax_store(meta, (max == id) ? WH_FO : max);
-  }
+  if (id == wormmeta_bitmax_load(meta))
+    wormmeta_bitmax_store(meta, wormmeta_bm_lt(meta, id));
 }
 // }}} meta-bitmap
 

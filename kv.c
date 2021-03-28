@@ -820,8 +820,7 @@ kvmap_api_helper_message(void)
 }
 
   int
-kvmap_api_helper(int argc, char ** const argv,
-    const struct kvmap_mm * const mm, const bool locking,
+kvmap_api_helper(int argc, char ** const argv, const struct kvmap_mm * const mm,
     const struct kvmap_api ** const api_out, void ** const map_out)
 {
   // "api" "name" "arg1", ...
@@ -838,9 +837,6 @@ kvmap_api_helper(int argc, char ** const argv,
 
     void * const map = reg->create(argv[1], mm, argv + 2); // skip "api" "name"
     if (map) {
-      if (reg->api->locking)
-        reg->api->locking(map, locking);
-
       *api_out = reg->api;
       *map_out = map;
       return 2 + reg->nargs;

@@ -17,7 +17,7 @@ kv_crc32c(const void * const ptr, u32 len);
 
   extern u64
 kv_crc32c_extend(const u32 crc32c);
-// }}}
+// }}} crc32c
 
 // kv {{{
 
@@ -402,8 +402,6 @@ struct kvmap_api {
   void        (* resume)  (void * ref);
 
   // UNSAFE functions:
-  // turn locking on/off; returns if locking is on/off
-  bool        (* locking) (void * map, const bool locking);
   // empty the map
   void        (* clean)   (void * map);
   // erase everything
@@ -432,8 +430,7 @@ kvmap_api_register(const int nargs, const char * const name, const char * const 
 kvmap_api_helper_message(void);
 
   extern int
-kvmap_api_helper(int argc, char ** const argv,
-    const struct kvmap_mm * const mm, const bool map_locking,
+kvmap_api_helper(int argc, char ** const argv, const struct kvmap_mm * const mm,
     const struct kvmap_api ** const api_out, void ** const map_out);
 // }}} kvmap_api
 
