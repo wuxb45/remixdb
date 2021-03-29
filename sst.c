@@ -1588,9 +1588,9 @@ ssty_ranks_match_mask(const u8 * const ranks, const u8 rank)
   const m128 rankv = _mm_set1_epi8(rank);
   const m128 tmpv0 = _mm_and_si128(_mm_load_si128((const void *)ranks), maskv);
   const m128 tmpv1 = _mm_and_si128(_mm_load_si128((const void *)(ranks+sizeof(m128))), maskv);
-  const u32 bits0 = (u32)_mm_movemask_epi8(_mm_cmpeq_epi8(tmpv0, rankv));
-  const u32 bits1 = (u32)_mm_movemask_epi8(_mm_cmpeq_epi8(tmpv1, rankv));
-  return (bits1 << sizeof(m128)) | bits0;
+  const u32 masklo = m128_movemask_u8(_mm_cmpeq_epi8(tmpv0, rankv));
+  const u32 maskhi = m128_movemask_u8(_mm_cmpeq_epi8(tmpv1, rankv));
+  return (maskhi << sizeof(m128)) | masklo;
 #endif // __AVX2__
 #elif SSTY_DBITS == 4
   const m128 maskv = _mm_set1_epi8(SSTY_RANK);
@@ -1600,32 +1600,18 @@ ssty_ranks_match_mask(const u8 * const ranks, const u8 rank)
 #endif // SSTY_DBITS
 
 #elif defined(__aarch64__)
-  static const u8 vtbl[8] = {0, 8, 16, 24, 32, 32, 32, 32};
   const m128 maskv = vdupq_n_u8(SSTY_RANK);
   const m128 d = vdupq_n_u8(rank);
 #if SSTY_DBITS == 5
   const m128 cmplo = vceqq_u8(vandq_u8(vld1q_u8(ranks), maskv), d); // cmpeq => 0xff or 0x00
   const m128 cmphi = vceqq_u8(vandq_u8(vld1q_u8(ranks + sizeof(m128)), maskv), d); // cmpeq => 0xff or 0x00
-  const uint16x8_t sr1lo = vreinterpretq_u16_u8(vshrq_n_u8(cmplo, 7)); // 1-bit x16 => 0x1 or 0x0
-  const uint16x8_t sr1hi = vreinterpretq_u16_u8(vshrq_n_u8(cmphi, 7)); // 1-bit x16 => 0x1 or 0x0
-  const uint32x4_t sr2lo = vreinterpretq_u32_u16(vsraq_n_u16(sr1lo, sr1lo, 7)); // 2-bit x8 => 0x2|0x1 = 0x3
-  const uint32x4_t sr2hi = vreinterpretq_u32_u16(vsraq_n_u16(sr1hi, sr1hi, 7)); // 2-bit x8 => 0x2|0x1 = 0x3
-  const uint64x2_t sr4lo = vreinterpretq_u64_u32(vsraq_n_u32(sr2lo, sr2lo, 14)); // 4-bit x4 => 0xc|0x3 = 0xf
-  const uint64x2_t sr4hi = vreinterpretq_u64_u32(vsraq_n_u32(sr2hi, sr2hi, 14)); // 4-bit x4 => 0xc|0x3 = 0xf
-  const m128 sr8lo = vreinterpretq_u8_u64(vsraq_n_u64(sr4lo, sr4lo, 28)); // 8-bit x2 => 0xf0|0xf = 0xff
-  const m128 sr8hi = vreinterpretq_u8_u64(vsraq_n_u64(sr4hi, sr4hi, 28)); // 8-bit x2 => 0xf0|0xf = 0xff
-  const uint8x8_t rv = vqtbl2_u8((uint8x16x2_t){sr8lo, sr8hi}, vld1_u8(vtbl));
-  const u32 r = vget_lane_u32(vreinterpret_u32_u8(rv), 0);
+  const u32 masklo = m128_movemask_u8(cmplo);
+  const u32 maskhi = m128_movemask_u8(cmphi);
+  return (maskhi << sizeof(m128)) | masklo;
 #elif SSTY_DBITS == 4
   const m128 cmp = vceqq_u8(vandq_u8(vld1q_u8(ranks), maskv), d); // cmpeq => 0xff or 0x00
-  const uint16x8_t sr1 = vreinterpretq_u16_u8(vshrq_n_u8(cmp, 7)); // 1-bit x16 => 0x1 or 0x0
-  const uint32x4_t sr2 = vreinterpretq_u32_u16(vsraq_n_u16(sr1, sr1, 7)); // 2-bit x8 => 0x2|0x1 = 0x3
-  const uint64x2_t sr4 = vreinterpretq_u64_u32(vsraq_n_u32(sr2, sr2, 14)); // 4-bit x4 => 0xc|0x3 = 0xf
-  const m128 sr8 = vreinterpretq_u8_u64(vsraq_n_u64(sr4, sr4, 28)); // 8-bit x2 => 0xf0|0xf = 0xff
-  const uint8x8_t rv = vqtbl1_u8(sr8, vld1_u8(vtbl));
-  const u32 r = vget_lane_u32(vreinterpret_u32_u8(rv), 0);
+  return m128_movemask_u8(cmp);
 #endif // SSTY_DBITS
-  return r;
 
 #endif // __x86_64__
 }

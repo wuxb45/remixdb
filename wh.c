@@ -747,11 +747,8 @@ wormhmap_match_mask(const struct wormslot * const s, const m128 skey)
 #elif defined(__aarch64__)
   const uint16x8_t sv = vld1q_u16((const u16 *)s); // load 16 bytes at s
   const uint16x8_t cmp = vceqq_u16(vreinterpretq_u16_u8(skey), sv); // cmpeq => 0xffff or 0x0000
-  const uint32x4_t sr2 = vreinterpretq_u32_u16(vshrq_n_u16(cmp, 14)); // 2-bit x8 => 0x3 or 0x0
-  const uint64x2_t sr4 = vreinterpretq_u64_u32(vsraq_n_u32(sr2, sr2, 14)); // 4-bit x4 => 0xc|0x3 = 0xf
-  const uint16x8_t sr8 = vreinterpretq_u16_u64(vsraq_n_u64(sr4, sr4, 28)); // 8-bit x2 => 0xf0|0xf = 0xff
-  const u32 r = ((u32)vgetq_lane_u16(sr8, 0)) | (((u32)vgetq_lane_u16(sr8, 4)) << 8); // 0xff|0xff00 = 0xffff
-  return r;
+  static const uint16x8_t mbits = {0x3, 0xc, 0x30, 0xc0, 0x300, 0xc00, 0x3000, 0xc000};
+  return (u32)vaddvq_u16(vandq_u16(cmp, mbits));
 #endif
 }
 
@@ -761,9 +758,9 @@ wormhmap_match_any(const struct wormslot * const s, const m128 skey)
 #if defined(__x86_64__)
   return wormhmap_match_mask(s, skey) != 0;
 #elif defined(__aarch64__)
-  const uint16x8_t sv = vld1q_u16((const u16 *)s);
-  const uint16x8_t cmp = vceqq_u16(vreinterpretq_u16_u8(skey), sv); // cmpeq
-  return vmaxvq_u32(vreinterpretq_u32_u16(cmp)) != 0;
+  const uint16x8_t sv = vld1q_u16((const u16 *)s); // load 16 bytes at s
+  const uint16x8_t cmp = vceqq_u16(vreinterpretq_u16_u8(skey), sv); // cmpeq => 0xffff or 0x0000
+  return vaddvq_u32(vreinterpretq_u32_u16(cmp)) != 0;
 #endif
 }
 
@@ -1553,15 +1550,13 @@ wormleaf_search_is(const struct wormleaf * const leaf, const u8 ih)
   }
 #endif // __AVX2__
 #elif defined(__aarch64__)
+  static const m128 vtbl = {0, 8, 1, 9, 2, 10, 3, 11, 4, 12, 5, 13, 6, 14, 7, 15};
+  static const uint16x8_t mbits = {0x0101, 0x0202, 0x0404, 0x0808, 0x1010, 0x2020, 0x4040, 0x8080};
   const m128 i1 = vdupq_n_u8(ih);
   for (u32 i = 0; i < leaf->nr_keys; i += sizeof(m128)) {
-    const m128 sv = vld1q_u8(leaf->ss+i);
-    const m128 cmp = vceqq_u8(sv, i1); // cmpeq => 0xff or 0x00
-    const uint16x8_t sr1 = vreinterpretq_u16_u8(vshrq_n_u8(cmp, 7)); // 1-bit x16 => 1 or 0
-    const uint32x4_t sr2 = vreinterpretq_u32_u16(vsraq_n_u16(sr1, sr1, 7)); // 2-bit x8 => 0x2|0x1 = 0x3
-    const uint64x2_t sr4 = vreinterpretq_u64_u32(vsraq_n_u32(sr2, sr2, 14)); // 4-bit x4 => 0xc|0x3 = 0xf
-    const uint16x8_t sr8 = vreinterpretq_u16_u64(vsraq_n_u64(sr4, sr4, 28)); // 8-bit x2 => 0xf0|0xf = 0xff
-    const u32 mask = ((u32)vgetq_lane_u16(sr8, 0)) | (((u32)vgetq_lane_u16(sr8, 4)) << 8); // 0xff|0xff00 = 0xffff
+    const m128 cmp = vceqq_u8(vld1q_u8(leaf->ss+i), i1); // cmpeq => 0xff or 0x00
+    const m128 cmp1 = vqtbl1q_u8(cmp, vtbl); // reorder
+    const u32 mask = (u32)vaddvq_u16(vandq_u8(vreinterpretq_u16_u8(cmp1), mbits));
     if (mask)
       return i + (u32)__builtin_ctz(mask);
   }
@@ -1760,8 +1755,8 @@ wormleaf_shift_inc(struct wormleaf * const leaf, const u32 to, const u32 from, c
     const m128 add1 = _mm_and_si128(_mm_cmpgt_epi8(_mm_add_epi8(sv, addx), cmpx), ones);
     _mm_store_si128((m128 *)(leaf->ss+i), _mm_add_epi8(sv, add1));
   }
-#endif
-#else // __x86_64__
+#endif // __AVX2__
+#elif defined(__aarch64__) // __x86_64__
   // aarch64
   const m128 subx = vdupq_n_u8((u8)from);
   const m128 cmpx = vdupq_n_u8((u8)nr);
@@ -1801,7 +1796,7 @@ wormleaf_shift_dec(struct wormleaf * const leaf, const u32 to, const u32 from, c
     _mm_store_si128((m128 *)(leaf->ss+i), _mm_sub_epi8(sv, add1));
   }
 #endif // __AVX2__
-#else // __x86_64__
+#elif defined(__aarch64__) // __x86_64__
   // aarch64
   const m128 subx = vdupq_n_u8((u8)from);
   const m128 cmpx = vdupq_n_u8((u8)nr);
@@ -1810,7 +1805,7 @@ wormleaf_shift_dec(struct wormleaf * const leaf, const u32 to, const u32 from, c
     const m128 add1 = vshrq_n_u8(vcltq_u8(vsubq_u8(sv, subx), cmpx), 7);
     vst1q_u8(leaf->ss+i, vsubq_u8(sv, add1));
   }
-#endif
+#endif // __x86_64__
 }
 
 // insert hs and also shift ss

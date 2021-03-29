@@ -27,6 +27,14 @@
 #include <sys/resource.h>
 #include <sys/stat.h>
 #include <sys/types.h>
+
+// SIMD
+#if defined(__x86_64__)
+#include <x86intrin.h>
+#elif defined(__aarch64__)
+#include <arm_acle.h>
+#include <arm_neon.h>
+#endif
 // }}} includes
 
 #ifdef __cplusplus
@@ -55,6 +63,20 @@ static_assert(sizeof(u16) == 2, "sizeof(u16)");
 static_assert(sizeof(u32) == 4, "sizeof(u32)");
 static_assert(sizeof(u64) == 8, "sizeof(u64)");
 static_assert(sizeof(u128) == 16, "sizeof(u128)");
+
+#if defined(__x86_64__)
+typedef __m128i m128;
+#if defined(__AVX2__)
+typedef __m256i m256;
+#endif // __AVX2__
+#if defined(__AVX512F__)
+typedef __m512i m512;
+#endif // __AVX512F__
+#elif defined(__aarch64__)
+typedef uint8x16_t m128;
+#else
+#error Need x86_64 or AArch64.
+#endif
 // }}} types
 
 // defs {{{
@@ -464,6 +486,17 @@ bits_round_down(const u64 v, const u8 power);
   extern u64
 bits_round_down_a(const u64 v, const u64 a);
 // }}} bits
+
+// simd {{{
+  extern u32
+m128_movemask_u8(const m128 v);
+
+  extern u32
+m128_movemask_u16(const m128 v);
+
+  extern u32
+m128_movemask_u32(const m128 v);
+// }}} simd
 
 // vi128 {{{
   extern u32

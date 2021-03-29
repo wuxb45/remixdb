@@ -9,12 +9,6 @@
 
 #include <assert.h>
 #include <stdatomic.h>
-#if defined(__x86_64__)
-#include <x86intrin.h>
-#elif defined(__aarch64__)
-#include <arm_acle.h>
-#include <arm_neon.h>
-#endif
 
 /* C11 atomic types */
 typedef atomic_bool             abool;
@@ -44,17 +38,3 @@ static_assert(sizeof(as64) == 8, "sizeof(as64)");
 #define MO_RELEASE memory_order_release
 #define MO_ACQ_REL memory_order_acq_rel
 #define MO_SEQ_CST memory_order_seq_cst
-
-#if defined(__x86_64__)
-typedef __m128i m128;
-#if defined(__AVX2__)
-typedef __m256i m256;
-#endif // __AVX2__
-#if defined(__AVX512F__)
-typedef __m512i m512;
-#endif // __AVX512F__
-#elif defined(__aarch64__)
-typedef uint8x16_t m128;
-#else
-#error Need x86_64 or AArch64.
-#endif
