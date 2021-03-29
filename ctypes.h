@@ -50,6 +50,9 @@ typedef __m128i m128;
 #if defined(__AVX2__)
 typedef __m256i m256;
 #endif // __AVX2__
+#if defined(__AVX512F__)
+typedef __m512i m512;
+#endif // __AVX512F__
 #elif defined(__aarch64__)
 typedef uint8x16_t m128;
 #else

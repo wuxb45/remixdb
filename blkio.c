@@ -750,9 +750,14 @@ coq_pwrite_uring(struct coq * const q, struct io_uring * const ring0,
 // rcache {{{
 // read-only cache
 #define RCACHE_NWAY ((16u))
-#define RCACHE_VWAY ((RCACHE_NWAY / 4))
+#define RCACHE_VSHIFT128 ((2))
+#define RCACHE_VSHIFT256 ((3))
+#define RCACHE_VSHIFT512 ((4))
+#define RCACHE_VWAY128 ((RCACHE_NWAY >> RCACHE_VSHIFT128))
+#define RCACHE_VWAY256 ((RCACHE_NWAY >> RCACHE_VSHIFT256))
+#define RCACHE_VWAY512 ((RCACHE_NWAY >> RCACHE_VSHIFT512))
 #define RCACHE_MASK ((RCACHE_NWAY - 1))
-#define RCACHE_MAXHIST ((UINT8_MAX-1))
+#define RCACHE_MAXHIST ((UINT8_MAX - 1))
 struct rcache_group {
   u8 hist[RCACHE_NWAY]; // 1x16=16B
   spinlock lock; // 4B
@@ -762,7 +767,13 @@ struct rcache_group {
   au16 refcnt[RCACHE_NWAY]; // 2x16=32B
   union {
     u32 tag[RCACHE_NWAY]; // 4x16=64B: high x-bit is fd; low y-bit is page-number (256MB max)
-    m128 tagv[RCACHE_VWAY];
+    m128 tagv128[RCACHE_VWAY128];
+#if defined(__AVX2__)
+    m256 tagv256[RCACHE_VWAY256];
+#endif
+#if defined(__AVX512F__)
+    m512 tagv512[RCACHE_VWAY512];
+#endif
   };
 };
 
@@ -1009,22 +1020,42 @@ rcache_hit_i(struct rcache * const c, const u32 gid, struct rcache_group * const
 rcache_hit(struct rcache * const c, const u32 tag, const u32 gid, struct rcache_group * const g)
 {
 #if defined(__x86_64__)
-  const m128 tmpv = _mm_set1_epi32((s32)tag);
-  for (u32 v = 0; v < RCACHE_VWAY; v++) {
-    const u32 m = (u32)_mm_movemask_epi8(_mm_cmpeq_epi32(tmpv, g->tagv[v]));
+#if defined(__AVX512F__)
+  const m512 tmpv = _mm512_set1_epi32((s32)tag);
+  for (u32 v = 0; v < RCACHE_VWAY512; v++) {
+    const u32 m = (u32)_mm512_cmpeq_epu32_mask(tmpv, g->tagv512[v]);
     if (m) {
-      const u32 i = (v << 2) + ((u32)__builtin_ctz(m) >> 2);
+      const u32 i = (v << RCACHE_VSHIFT512) + ((u32)__builtin_ctz(m));
       return rcache_hit_i(c, gid, g, i);
     }
   }
-#else
+#elif defined(__AVX2__)
+  const m256 tmpv = _mm256_set1_epi32((s32)tag);
+  for (u32 v = 0; v < RCACHE_VWAY256; v++) {
+    const u32 m = (u32)_mm256_movemask_epi8(_mm256_cmpeq_epi32(tmpv, g->tagv256[v]));
+    if (m) {
+      const u32 i = (v << RCACHE_VSHIFT256) + ((u32)__builtin_ctz(m) >> 2);
+      return rcache_hit_i(c, gid, g, i);
+    }
+  }
+#else // SSE4.2
+  const m128 tmpv = _mm_set1_epi32((s32)tag);
+  for (u32 v = 0; v < RCACHE_VWAY128; v++) {
+    const u32 m = (u32)_mm_movemask_epi8(_mm_cmpeq_epi32(tmpv, g->tagv128[v]));
+    if (m) {
+      const u32 i = (v << RCACHE_VSHIFT128) + ((u32)__builtin_ctz(m) >> 2);
+      return rcache_hit_i(c, gid, g, i);
+    }
+  }
+#endif // __AVX512F__
+#else // TODO: AArch64 SIMD
   const u32 i0 = tag & RCACHE_MASK;
   for (u32 k = 0; k < RCACHE_NWAY; k++) {
     const u32 i = (k + i0) & RCACHE_MASK;
     if (g->tag[i] == tag) // hit
       return rcache_hit_i(c, gid, g, i);
   }
-#endif
+#endif // __x86_64__
   // still locked
   return NULL;
 }
