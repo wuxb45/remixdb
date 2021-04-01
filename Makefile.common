@@ -71,6 +71,7 @@ ifeq ($(UNAME_S),Linux)
   LIB += rt
 else ifeq ($(UNAME_S),FreeBSD)
   CHECK_S := -D__FreeBSD__
+  FLG += -I/usr/local/include -L/usr/local/lib
   LIB += rt
   LIB += execinfo
   TPUT := /usr/local/bin/tput
@@ -89,6 +90,9 @@ XSTD = -std=gnu++17
 
 UNAME_M := $(shell uname -m)
 ifeq ($(UNAME_M),aarch64) # "native" does not work for clang@aarch64
+  CHECK_M := -D__aarch64__
+  ARCH ?= armv8-a+crc
+else ifeq ($(UNAME_M),arm64) # "native" does not work for clang@aarch64
   CHECK_M := -D__aarch64__
   ARCH ?= armv8-a+crc
 else ifeq ($(UNAME_M),x86_64)

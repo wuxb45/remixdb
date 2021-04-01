@@ -1421,6 +1421,13 @@ wormleaf_kv_at_is(const struct wormleaf * const leaf, const u32 is)
   return u64_to_ptr(leaf->hs[leaf->ss[is]].e3);
 }
 
+  static inline void
+wormleaf_prefetch_ss(const struct wormleaf * const leaf)
+{
+  for (u32 i = 0; i < WH_KPN; i+=64)
+    cpu_prefetch0(&leaf->ss[i]);
+}
+
 // leaf must have been sorted
 // return the key at [i] as if k1 has been inserted into leaf; i <= leaf->nr_sorted
   static const struct kv *
@@ -1603,6 +1610,7 @@ wormleaf_search_ss(const struct wormleaf * const leaf, const struct kref * const
 wormleaf_seek(const struct wormleaf * const leaf, const struct kref * const key)
 {
   debug_assert(leaf->nr_sorted == leaf->nr_keys);
+  wormleaf_prefetch_ss(leaf); // effective for both hit and miss
   const u32 ih = wormleaf_match_hs(leaf, key);
   if (ih < WH_KPN) { // hit
     return wormleaf_search_is(leaf, (u8)ih);

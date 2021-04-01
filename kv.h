@@ -209,7 +209,7 @@ struct kvmap_mm {
   // to duplicate a private copy of "kv" to "out"
   // see get() and iter_peek() functions
   kvmap_mm_out_func out;
-  // to free an a private kv
+  // to free a kv
   // see del() and set() functions
   kvmap_mm_free_func free;
   void * priv;
