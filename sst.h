@@ -109,6 +109,9 @@ sst_iter_retain(struct sst_iter * const iter);
 sst_iter_release(struct sst_iter * const iter, const u64 opaque);
 
   extern void
+sst_iter_skip1(struct sst_iter * const iter);
+
+  extern void
 sst_iter_skip(struct sst_iter * const iter, const u32 nr);
 
   extern struct kv *
@@ -183,6 +186,9 @@ msstx_iter_retain(struct msstx_iter * const iter);
 
   extern void
 msstx_iter_release(struct msstx_iter * const iter, const u64 opaque);
+
+  extern void
+msstx_iter_skip1(struct msstx_iter * const iter);
 
   extern void
 msstx_iter_skip(struct msstx_iter * const iter, const u32 nr);
@@ -281,6 +287,9 @@ mssty_iter_retain(struct mssty_iter * const iter);
 mssty_iter_release(struct mssty_iter * const iter, const u64 opaque);
 
   extern void
+mssty_iter_skip1(struct mssty_iter * const iter);
+
+  extern void
 mssty_iter_skip(struct mssty_iter * const iter, const u32 nr);
 
   extern struct kv *
@@ -300,6 +309,9 @@ mssty_iter_ts(struct mssty_iter * const iter);
 mssty_iter_seek_ts(struct mssty_iter * const iter, const struct kref * const key);
 
   extern void
+mssty_iter_skip1_ts(struct mssty_iter * const iter);
+
+  extern void
 mssty_iter_skip_ts(struct mssty_iter * const iter, const u32 nr);
 
   extern struct kv *
@@ -308,6 +320,9 @@ mssty_iter_next_ts(struct mssty_iter * const iter, struct kv * const out);
 // dup iter: return all versions, including old keys and tombstones
   extern struct kv *
 mssty_iter_peek_dup(struct mssty_iter * const iter, struct kv * const out);
+
+  extern void
+mssty_iter_skip1_dup(struct mssty_iter * const iter);
 
   extern void
 mssty_iter_skip_dup(struct mssty_iter * const iter, const u32 nr);
@@ -411,6 +426,9 @@ msstv_iter_retain(struct msstv_iter * const vi);
 msstv_iter_release(struct msstv_iter * const vi, const u64 opaque);
 
   extern void
+msstv_iter_skip1(struct msstv_iter * const vi);
+
+  extern void
 msstv_iter_skip(struct msstv_iter * const vi, const u32 nr);
 
   extern struct kv *
@@ -424,6 +442,9 @@ msstv_iter_ts(struct msstv_iter * const vi);
 
   extern void
 msstv_iter_seek_ts(struct msstv_iter * const vi, const struct kref * const key);
+
+  extern void
+msstv_iter_skip1_ts(struct msstv_iter * const vi);
 
   extern void
 msstv_iter_skip_ts(struct msstv_iter * const vi, const u32 nr);

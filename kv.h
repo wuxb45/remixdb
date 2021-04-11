@@ -154,6 +154,9 @@ kv_dup2_key_prefix(const struct kv * const from, struct kv * const to, const u32
 kv_match(const struct kv * const key1, const struct kv * const key2);
 
   extern bool
+kv_match_hash(const struct kv * const key1, const struct kv * const key2);
+
+  extern bool
 kv_match_full(const struct kv * const kv1, const struct kv * const kv2);
 
   extern bool
@@ -333,13 +336,14 @@ struct kvmap_api {
   bool refpark; // ref has park() and resume()
   bool reserved;
 
-  // set (aka upsert): return true on success; false on error
+  // set (aka put/upsert): return true on success; false on error
   // mm.in() controls how things move into the kvmap; the default mm make a copy with malloc()
   // mm.free() controls how old kv get disposed when replaced
   bool        (* set)     (void * const ref, struct kv * const kv);
   // get: search and return a kv if found, or NULL if not
   // with the default mm: malloc() if out == NULL; otherwise, use out as buffer
   // with custom kvmap_mm: mm.out() controls buffer; use with caution
+  // caller should use the returned ptr even if out is provided
   struct kv * (* get)     (void * const ref, const struct kref * const key, struct kv * const out);
   // probe: return true on found, false on not found
   bool        (* probe)   (void * const ref, const struct kref * const key);
@@ -359,36 +363,41 @@ struct kvmap_api {
   // make everything persist; for persistent maps only
   void        (* sync)    (void * const ref);
 
-  // for thread-safe iter: it is assumed the key under the current cursor is freezed/immutable
-  // create iterator from a ref; must call iter_seek to make it valid
-  void *      (* iter_create)  (void * const ref);
+  // general guidelines for thread-safe iters:
+  // - it is assumed that the key under the cursor is locked/freezed/immutable
+  // - once created one must call iter_seek to make it valid
+  // - the ownership of ref is given to the iter so ref should not be used until iter_destroy
+  // - creating and use more than one iter based on a ref can cause deadlocks
+  void *      (* iter_create)   (void * const ref);
   // move the cursor to the first key >= search-key;
-  void        (* iter_seek)    (void * const iter, const struct kref * const key);
+  void        (* iter_seek)     (void * const iter, const struct kref * const key);
   // check if the cursor points to a valid key
-  bool        (* iter_valid)   (void * const iter);
+  bool        (* iter_valid)    (void * const iter);
   // return the current key; copy to out if (out != NULL)
   // mm.out() controls copy-out
-  struct kv * (* iter_peek)    (void * const iter, struct kv * const out);
+  struct kv * (* iter_peek)     (void * const iter, struct kv * const out);
   // similar to peek but does not copy; return false if iter is invalid
-  bool        (* iter_kref)    (void * const iter, struct kref * const kref);
+  bool        (* iter_kref)     (void * const iter, struct kref * const kref);
   // similar to iter_kref but also provide the value
-  bool        (* iter_kvref)   (void * const iter, struct kvref * const kvref);
+  bool        (* iter_kvref)    (void * const iter, struct kvref * const kvref);
   // iter_retain makes kref or kvref of the current iter remain valid until released
   // the returned opaque pointer should be provided when releasing the hold
-  u64         (* iter_retain)  (void * const iter);
-  void        (* iter_release) (void * const iter, const u64 opaque);
-  // move the cursor to the next key
-  void        (* iter_skip)    (void * const iter, const u32 nr);
-  // iter_next == iter_peek + iter_skip
-  struct kv * (* iter_next)    (void * const iter, struct kv * const out);
+  u64         (* iter_retain)   (void * const iter);
+  void        (* iter_release)  (void * const iter, const u64 opaque);
+  // skip one element
+  void        (* iter_skip1)    (void * const iter);
+  // skip nr elements
+  void        (* iter_skip)     (void * const iter, const u32 nr);
+  // iter_next == iter_peek + iter_skip1
+  struct kv * (* iter_next)     (void * const iter, struct kv * const out);
   // perform inplace opeation if the current key is valid; return false if no current key
   // the uf() is always executed even with NULL key
-  bool        (* iter_inp)     (void * const iter, kv_inp_func uf, void * const priv);
+  bool        (* iter_inp)      (void * const iter, kv_inp_func uf, void * const priv);
   // invalidate the iter to release any resources or locks
   // afterward, must call seek() again before accessing data
-  void        (* iter_park)    (void * const iter);
+  void        (* iter_park)     (void * const iter);
   // destroy iter
-  void        (* iter_destroy) (void * const iter);
+  void        (* iter_destroy)  (void * const iter);
 
   // misc:
   // create refs for maps if required; always use use kvmap_ref() and kvmap_unref()
@@ -534,6 +543,18 @@ struct miter;
   extern struct miter *
 miter_create(void);
 
+// caller owns the ref and the iter; miter will not destroy them
+// using the iter or the ref with an active miter can lead to undefined behavior
+  extern bool
+miter_add_iter(struct miter * const miter, const struct kvmap_api * const api, void * const ref, void * const iter);
+
+// caller owns the ref; miter will create and destroy the iter
+// using the underlying ref with an active miter can lead to undefined behavior
+  extern void *
+miter_add_ref(struct miter * const miter, const struct kvmap_api * const api, void * const ref);
+
+// miter will take a ref of the map, create an iter, and clean up everything
+// be careful of using another ref/iter in the same thread
   extern void *
 miter_add(struct miter * const miter, const struct kvmap_api * const api, void * const map);
 
@@ -557,6 +578,9 @@ miter_kref(struct miter * const miter, struct kref * const kref);
 
   extern bool
 miter_kvref(struct miter * const miter, struct kvref * const kvref);
+
+  extern void
+miter_skip1(struct miter * const miter);
 
   extern void
 miter_skip(struct miter * const miter, const u32 nr);

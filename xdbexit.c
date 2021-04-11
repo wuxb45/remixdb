@@ -48,7 +48,7 @@ main(int argc, char** argv)
   remixdb_iter_skip(iter, kid);
   while (remixdb_iter_valid(iter)) {
     remixdb_iter_peek(iter, key, &klen, NULL, NULL);
-    remixdb_iter_skip(iter, 1);
+    remixdb_iter_skip1(iter);
     strdec_64(keycmp, count);
     count++;
     if (memcmp(key, keycmp, 20)) {

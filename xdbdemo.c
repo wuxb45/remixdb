@@ -68,7 +68,7 @@ main(int argc, char ** argv)
     } else {
       printf("ERROR!\n");
     }
-    remixdb_iter_skip(iter, 1);
+    remixdb_iter_skip1(iter);
   }
 
   // This is OPTIONAL!

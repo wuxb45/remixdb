@@ -69,6 +69,9 @@ xdb_iter_kref(struct xdb_iter * const iter, struct kref * const kref);
 xdb_iter_kvref(struct xdb_iter * const iter, struct kvref * const kvref);
 
   extern void
+xdb_iter_skip1(struct xdb_iter * const iter);
+
+  extern void
 xdb_iter_skip(struct xdb_iter * const iter, u32 n);
 
   extern struct kv*
@@ -126,6 +129,9 @@ remixdb_iter_valid(struct xdb_iter * const iter);
 remixdb_iter_peek(struct xdb_iter * const iter,
     void * const kbuf_out, u32 * const klen_out,
     void * const vbuf_out, u32 * const vlen_out);
+
+  extern void
+remixdb_iter_skip1(struct xdb_iter * const iter);
 
   extern void
 remixdb_iter_skip(struct xdb_iter * const iter, const u32 nr);

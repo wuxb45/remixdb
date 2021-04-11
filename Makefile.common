@@ -39,6 +39,8 @@ else ifeq ($O,0s) # make O=0s (address sanitizer)
 OPT ?= -g3 -O0 -fno-inline -fsanitize=address -fno-omit-frame-pointer -DHEAPCHECKING
 else ifeq ($O,3s) # make O=3s (address sanitizer)
 OPT ?= -g3 -O3 -fno-inline -fsanitize=address -fno-omit-frame-pointer -DHEAPCHECKING
+else ifeq ($O,t) # make O=0t (thread sanitizer)
+OPT ?= -g3 -O1 -fno-inline -fsanitize=thread -fno-stack-protector
 else ifeq ($O,cov) # make O=cov (for gcov)
 OPT ?= -g3 -DNDEBUG -O0 --coverage
 CCC = gcc

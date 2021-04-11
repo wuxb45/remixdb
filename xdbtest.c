@@ -101,7 +101,7 @@ getscan_worker(void * const ptr)
     debug_assert(klen_out == 16);
     if (memcmp(ktmp, kend, 16) < 0) {
       found++;
-      remixdb_iter_skip(iter, 1);
+      remixdb_iter_skip1(iter);
     } else {
       break;
     }

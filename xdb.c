@@ -128,7 +128,7 @@ wal_flush(struct wal * const wal)
     return;
 
   const size_t wsize = bits_round_up(wal->bufoff, 12); // whole pages
-  debug_assert(wsize < WAL_BLKSZ);
+  debug_assert(wsize <= WAL_BLKSZ);
   memset(wal->buf + wal->bufoff, 0, wsize - wal->bufoff);
   wring_write_partial(wal->wring, (off_t)wal->woff, wal->buf, 0, (u32)wsize);
   wal->buf = wring_acquire(wal->wring);
@@ -355,10 +355,10 @@ xdb_ref_all(struct xdb_ref * const ref)
   xdb_ref_leave(ref);
 }
 
-  static void
+  static inline void
 xdb_ref_update_version(struct xdb_ref * const ref)
 {
-  if (ref->xdb->mt_view != ref->mt_view) {
+  if (unlikely(ref->xdb->mt_view != ref->mt_view)) {
     xdb_unref_all(ref);
     xdb_ref_all(ref);
   }
@@ -417,7 +417,7 @@ xdb_reinsert_rejected(struct xdb * const xdb, void * const wmt_map, void * const
   void * const wmt_ref = kvmap_ref(wmt_api, wmt_map);
   void * const rej_ref = kvmap_ref(imt_api, imt_map);
   void * const rej_iter = imt_api->iter_create(rej_ref);
-  struct xdb_reinsert_merge_ctx ctx = {.xdb = xdb}; // only use new_kv and success
+  struct xdb_reinsert_merge_ctx ctx = {.xdb = xdb}; // only use newkv and success
 
   for (u32 i = 0; anchors[i]; i++) {
     if (anchors[i]->vlen == 0) // skip accepted partitions
@@ -652,21 +652,22 @@ wal_vi128_decode(const u8 * ptr, const u8 * const end, struct wal_kv * const wal
 }
 
 struct xdb_recover_merge_ctx {
-  struct kv * new_kv;
+  struct kv * newkv;
   u64 mtsz;
 };
 
+// kv_merge_func
 // call with lock
   static struct kv *
 xdb_recover_update_func(struct kv * const kv0, void * const priv)
 {
   struct xdb_recover_merge_ctx * const ctx = priv;
-  const size_t newsz = sst_kv_size(ctx->new_kv);
+  const size_t newsz = sst_kv_size(ctx->newkv);
   const size_t oldsz = kv0 ? sst_kv_size(kv0) : 0;
   const size_t diffsz = newsz - oldsz;
   debug_assert(ctx->mtsz >= oldsz);
   ctx->mtsz += diffsz;
-  return ctx->new_kv;
+  return ctx->newkv;
 }
 
 // use xdb->mt1, xdb->mtsz, xdb->z (for loggging)
@@ -704,7 +705,7 @@ xdb_recover_fd(struct xdb * const xdb, const int fd)
     kv->vlen = wal_kv.vlen;
     kv->hash = kv_crc32c_extend(wal_kv.kref.hash32);
     memcpy(kv->kv, wal_kv.kref.ptr, wal_kv.kvlen);
-    ctx.new_kv = kv;
+    ctx.newkv = kv;
     bool s = wmt_api->merge(wmt_ref, &wal_kv.kref, xdb_recover_update_func, &ctx);
     if (!s)
       debug_die();
@@ -974,19 +975,20 @@ xdb_write_enter(struct xdb_ref * const ref)
 }
 
 struct xdb_mt_merge_ctx {
-  struct kv * new_kv;
+  struct kv * newkv;
   struct xdb * xdb;
   struct mt_pair * mt_view;
   bool success;
 };
 
+// kv_merge_func
 // call with lock
   static struct kv *
 xdb_mt_update_func(struct kv * const kv0, void * const priv)
 {
   struct xdb_mt_merge_ctx * const ctx = priv;
   struct xdb * const xdb = ctx->xdb;
-  const size_t newsz = sst_kv_size(ctx->new_kv);
+  const size_t newsz = sst_kv_size(ctx->newkv);
   const size_t oldsz = kv0 ? sst_kv_size(kv0) : 0;
   const size_t diffsz = newsz - oldsz;
   debug_assert(xdb->mtsz >= oldsz);
@@ -1000,11 +1002,11 @@ xdb_mt_update_func(struct kv * const kv0, void * const priv)
 
   xdb->mtsz += diffsz;
   xdb->wal.write_user += newsz;
-  wal_append(&xdb->wal, ctx->new_kv);
+  wal_append(&xdb->wal, ctx->newkv);
 
   xdb_unlock(xdb);
   ctx->success = true;
-  return ctx->new_kv;
+  return ctx->newkv;
 }
 
   static bool
@@ -1021,20 +1023,20 @@ xdb_update(struct xdb_ref * const ref, const struct kref * const kref, struct kv
     ctx.mt_view = ref->mt_view;
     s = wmt_api->merge(ref->wmt_ref, kref, xdb_mt_update_func, &ctx);
     xdb_ref_leave(ref);
-  } while (!ctx.success);
+  } while (s && !ctx.success);
   return s;
 }
 
   bool
 xdb_set(struct xdb_ref * const ref, const struct kv * const kv)
 {
-  struct kv * const new_kv = xdb_dup_kv(kv);
-  if (!new_kv)
+  struct kv * const newkv = xdb_dup_kv(kv);
+  if (!newkv)
     return false;
 
   struct kref kref;
   kref_ref_kv(&kref, kv);
-  return xdb_update(ref, &kref, new_kv);
+  return xdb_update(ref, &kref, newkv);
 }
 
   bool
@@ -1062,15 +1064,14 @@ xdb_sync(struct xdb_ref * const ref)
 xdb_iter_miter_ref(struct xdb_iter * const iter)
 {
   struct xdb_ref * const ref = iter->db_ref;
-  struct mt_pair * const mt_view = ref->mt_view;
-  iter->mt_view = mt_view; // remember mt_view used by miter
+  iter->mt_view = ref->mt_view; // remember mt_view used by miter
 
-  miter_add(iter->miter, &kvmap_api_msstv_ts, ref->v);
+  miter_add_ref(iter->miter, &kvmap_api_msstv_ts, ref->vref);
 
-  if (mt_view->imt)
-    miter_add(iter->miter, imt_api, mt_view->imt);
+  if (ref->imt_ref)
+    miter_add_ref(iter->miter, imt_api, ref->imt_ref);
 
-  miter_add(iter->miter, wmt_api, mt_view->wmt);
+  miter_add_ref(iter->miter, wmt_api, ref->wmt_ref);
 }
 
   static void
@@ -1158,6 +1159,13 @@ xdb_iter_kvref(struct xdb_iter * const iter, struct kvref * const kvref)
 }
 
   void
+xdb_iter_skip1(struct xdb_iter * const iter)
+{
+  miter_skip_unique(iter->miter);
+  xdb_iter_skip_ts(iter);
+}
+
+  void
 xdb_iter_skip(struct xdb_iter * const iter, const u32 n)
 {
   for (u32 i = 0; i < n; i++) {
@@ -1170,7 +1178,7 @@ xdb_iter_skip(struct xdb_iter * const iter, const u32 n)
 xdb_iter_next(struct xdb_iter * const iter, struct kv * const out)
 {
   struct kv * const kv = xdb_iter_peek(iter, out);
-  xdb_iter_skip(iter, 1);
+  xdb_iter_skip1(iter);
   return kv;
 }
 
@@ -1202,6 +1210,7 @@ const struct kvmap_api kvmap_api_xdb = {
   .iter_peek = (void*)xdb_iter_peek,
   .iter_kref = (void*)xdb_iter_kref,
   .iter_kvref = (void*)xdb_iter_kvref,
+  .iter_skip1 = (void*)xdb_iter_skip1,
   .iter_skip = (void*)xdb_iter_skip,
   .iter_next = (void*)xdb_iter_next,
   .iter_park = (void*)xdb_iter_park,
@@ -1275,13 +1284,13 @@ remixdb_set(struct xdb_ref * const ref, const void * const kbuf, const u32 klen,
   if ((klen + vlen) > 65500)
     return false;
 
-  struct kv * const new_kv = kv_create(kbuf, klen, vbuf, vlen);
-  if (!new_kv)
+  struct kv * const newkv = kv_create(kbuf, klen, vbuf, vlen);
+  if (!newkv)
     return false;
 
   struct kref kref;
-  kref_ref_kv(&kref, new_kv);
-  return xdb_update(ref, &kref, new_kv);
+  kref_ref_kv(&kref, newkv);
+  return xdb_update(ref, &kref, newkv);
 }
 
   bool
@@ -1398,6 +1407,12 @@ remixdb_iter_peek(struct xdb_iter * const iter,
   }
 
   return true;
+}
+
+  void
+remixdb_iter_skip1(struct xdb_iter * const iter)
+{
+  xdb_iter_skip1(iter);
 }
 
   void

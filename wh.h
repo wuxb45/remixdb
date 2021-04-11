@@ -68,6 +68,9 @@ wormhole_iter_kref(struct wormhole_iter * const iter, struct kref * const kref);
 wormhole_iter_kvref(struct wormhole_iter * const iter, struct kvref * const kvref);
 
   extern void
+wormhole_iter_skip1(struct wormhole_iter * const iter);
+
+  extern void
 wormhole_iter_skip(struct wormhole_iter * const iter, const u32 nr);
 
   extern struct kv *
@@ -148,6 +151,7 @@ whsafe_iter_peek(struct wormhole_iter * const iter, struct kv * const out);
 // use wormhole_iter_peek
 // use wormhole_iter_kref
 // use wormhole_iter_kvref
+// use wormhole_iter_skip1
 // use wormhole_iter_skip
 // use wormhole_iter_next
 // use wormhole_iter_inp
@@ -198,6 +202,9 @@ whunsafe_iter_seek(struct wormhole_iter * const iter, const struct kref * const 
 // unsafe iter_valid: use wormhole_iter_valid
 // unsafe iter_peek: use wormhole_iter_peek
 // unsafe iter_kref: use wormhole_iter_kref
+
+  extern void
+whunsafe_iter_skip1(struct wormhole_iter * const iter);
 
   extern void
 whunsafe_iter_skip(struct wormhole_iter * const iter, const u32 nr);

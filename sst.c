@@ -99,7 +99,7 @@ sst_kvmap_estimate(const struct kvmap_api * const api, void * const map,
       break;
     est += sst_kv_vi128_estimate(kv_inp);
     est += sizeof(u16);
-    api->iter_skip(iter, 1);
+    api->iter_skip1(iter);
   }
 
   api->iter_destroy(iter);
@@ -1067,7 +1067,7 @@ sst_iter_release(struct sst_iter * const iter, const u64 opaque)
   sst_blk_release(iter->sst->rc, (const u8 *)opaque);
 }
 
-  static void
+  void
 sst_iter_skip1(struct sst_iter * const iter)
 {
   debug_assert(sst_iter_valid(iter));
@@ -1431,6 +1431,18 @@ msstx_iter_release(struct msstx_iter * const iter, const u64 opaque)
 }
 
   void
+msstx_iter_skip1(struct msstx_iter * const iter)
+{
+  if (!msstx_iter_valid(iter))
+    return;
+  struct sst_iter * const iter1 = iter->mh[1];
+  sst_iter_skip1(iter1);
+  if (sst_iter_valid(iter1))
+    sst_iter_fix_kv(iter1);
+  msstx_mh_downheap(iter, 1);
+}
+
+  void
 msstx_iter_skip(struct msstx_iter * const iter, const u32 nr)
 {
   for (u32 i = 0; i < nr; i++) {
@@ -1448,7 +1460,7 @@ msstx_iter_skip(struct msstx_iter * const iter, const u32 nr)
 msstx_iter_next(struct msstx_iter * const iter, struct kv * const out)
 {
   struct kv * const ret = msstx_iter_peek(iter, out);
-  msstx_iter_skip(iter, 1);
+  msstx_iter_skip1(iter);
   return ret;
 }
 
@@ -1770,7 +1782,7 @@ mssty_ref(struct msst * const msst)
     return NULL;
 
   mssty_iter_init(iter, msst);
-  mssty_iter_seek_null(iter);
+  iter->kidx = iter->ssty->nkidx; // invalid
   return (struct mssty_ref *)iter;
 }
 
@@ -1879,14 +1891,8 @@ mssty_get_value_ts(struct mssty_ref * const ref, const struct kref * const key,
   struct mssty_iter *
 mssty_iter_create(struct mssty_ref * const ref)
 {
-  struct mssty_iter * const iter0 = (typeof(iter0))ref;
-  struct mssty_iter * const iter = malloc(sizeof(*iter));
-  if (iter == NULL)
-    return NULL;
-
-  mssty_iter_init(iter, iter0->msst);
-  iter->kidx = iter->ssty->nkidx;
-  return iter;
+  // ref is already an iter
+  return (struct mssty_iter *)ref;
 }
 
   inline bool
@@ -1922,7 +1928,7 @@ mssty_search_index(const struct ssty * const ssty, const struct kref * const key
 }
 
 // does not check iter_valid
-  static void
+  void
 mssty_iter_skip1(struct mssty_iter * const iter)
 {
   debug_assert(mssty_iter_valid(iter));
@@ -2292,7 +2298,6 @@ mssty_iter_next(struct mssty_iter * const iter, struct kv * const out)
 mssty_iter_destroy(struct mssty_iter * const iter)
 {
   mssty_iter_park(iter);
-  free(iter);
 }
 
 // ts iter: ignore a key if its newest version is a tombstone
@@ -2307,6 +2312,16 @@ mssty_iter_ts(struct mssty_iter * const iter)
 mssty_iter_seek_ts(struct mssty_iter * const iter, const struct kref * const key)
 {
   mssty_iter_seek(iter, key);
+  while (mssty_iter_valid(iter) && mssty_iter_ts(iter))
+    mssty_iter_skip1(iter);
+}
+
+  void
+mssty_iter_skip1_ts(struct mssty_iter * const iter)
+{
+  if (!mssty_iter_valid(iter))
+    return;
+  mssty_iter_skip1(iter);
   while (mssty_iter_valid(iter) && mssty_iter_ts(iter))
     mssty_iter_skip1(iter);
 }
@@ -2328,7 +2343,7 @@ mssty_iter_skip_ts(struct mssty_iter * const iter, const u32 nr)
 mssty_iter_next_ts(struct mssty_iter * const iter, struct kv * const out)
 {
   struct kv * const ret = mssty_iter_peek(iter, out);
-  mssty_iter_skip_ts(iter, 1);
+  mssty_iter_skip1_ts(iter);
   return ret;
 }
 // end of ts iter
@@ -2342,6 +2357,31 @@ mssty_iter_peek_dup(struct mssty_iter * const iter, struct kv * const out)
   const u8 rank = iter->ssty->ranks[iter->kidx] & SSTY_RANK; // rank starts with 0
   debug_assert(rank < iter->ssty->nway);
   return sst_iter_peek(&(iter->iters[rank]), out);
+}
+
+  void
+mssty_iter_skip1_dup(struct mssty_iter * const iter)
+{
+  if (!mssty_iter_valid(iter))
+    return;
+  struct ssty * const ssty = iter->ssty;
+  const u8 * const ranks = ssty->ranks;
+  u8 rank = ranks[iter->kidx] & SSTY_RANK;
+  debug_assert(rank < ssty->nway);
+
+  mssty_iter_skip1_rank(iter, rank);
+  iter->kidx++;
+
+  // skip gaps
+  while (ranks[iter->kidx] == SSTY_INVALID)
+    iter->kidx++;
+
+  if (!mssty_iter_valid(iter))
+    return;
+
+  // still valid
+  rank = ranks[iter->kidx] & SSTY_RANK;
+  mssty_iter_fix_rank(iter, rank);
 }
 
   void
@@ -2375,7 +2415,7 @@ mssty_iter_skip_dup(struct mssty_iter * const iter, const u32 nr)
 mssty_iter_next_dup(struct mssty_iter * const iter, struct kv * const out)
 {
   struct kv * const ret = mssty_iter_peek_dup(iter, out);
-  mssty_iter_skip_dup(iter, 1);
+  mssty_iter_skip1_dup(iter);
   return ret;
 }
 
@@ -2478,7 +2518,7 @@ mssty_dump(struct msst * const msst, const char * const fn)
     dprintf(fd, "%7u %7u%c %c%c%c%x %.*s (%u,%u)\n", n, iter->kidx, (iter->kidx % SSTY_DIST) ? ' ' : '*',
         stale ? '!' : ' ', ts ? 'X' : ' ', ts2 ? 'X' : ' ', rank & SSTY_RANK,
         kvref.hdr.klen, kvref.kptr, kvref.hdr.klen, kvref.hdr.vlen & SST_VLEN_MASK);
-    mssty_iter_skip_dup(iter, 1);
+    mssty_iter_skip1_dup(iter);
     n++;
   }
   mssty_iter_destroy(iter);
@@ -2670,6 +2710,7 @@ static const struct kvmap_api kvmap_api_sstc = {
   .iter_valid = (void *)sstc_iter_valid,
   .iter_kref = (void *)sstc_iter_kref,
   .iter_kvref = (void *)sstc_iter_kvref,
+  .iter_skip1 = (void *)sstc_iter_skip1,
   .iter_skip = (void *)sstc_iter_skip,
   .iter_destroy = (void *)sstc_iter_destroy,
 };
@@ -2811,7 +2852,7 @@ msstbm_ptrs(struct msstb * const b, struct sst_ptr * const ptrs)
   static void
 msstbm_skip1(struct msstb * const b)
 {
-  miter_skip(b->miter, 1);
+  miter_skip1(b->miter);
   b->idx++;
   msstbm_sync_rank(b);
 }
@@ -2929,7 +2970,7 @@ msstb2_sync_mp(struct msstb * const b)
 
   // skip placeholders and high-rank keys
   while ((iterb->kidx < b->nkidx) && ((b->ranks[iterb->kidx] & SSTY_RANK) >= b->way0))
-    mssty_iter_skip_dup(iterb, 1);
+    mssty_iter_skip1_dup(iterb);
 
   struct kref kref0; // the current
   if (mssty_iter_kref_dup(iterb, &kref0)) // mssty_iter is also valid
@@ -2969,7 +3010,7 @@ msstb2_skip1(struct msstb * const b)
   if (b->iter0.kidx < b->iterb.kidx) { // skip an old key
     b->stale = false; // stale is one shot only
     do {
-      mssty_iter_skip_dup(&(b->iter0), 1);
+      mssty_iter_skip1_dup(&(b->iter0));
     } while ((b->iter0.kidx < b->nkidx) && ((b->ranks[b->iter0.kidx] & SSTY_RANK) >= b->way0));
     debug_assert(b->iter0.kidx <= b->iterb.kidx);
   } else { // skip a new key
@@ -3019,7 +3060,7 @@ msstb2_create(struct msst * const msstx1, struct msst * const mssty0, const u32 
 
     // skip the first a few stale keys
     while ((b->iter0.kidx < b->nkidx) && ((b->ranks[b->iter0.kidx] & SSTY_RANK) >= b->way0))
-      mssty_iter_skip_dup(&(b->iter0), 1);
+      mssty_iter_skip1_dup(&(b->iter0));
   }
 
   u32 newcnt = 0;
@@ -3757,12 +3798,8 @@ msstv_iter_valid(struct msstv_iter * const vi)
   struct msstv_iter *
 msstv_iter_create(struct msstv_ref * const ref)
 {
-  struct msstv_iter * const vi0 = (typeof(vi0))ref;
-  struct msstv_iter * const vi = calloc(1, sizeof(*vi));
-  vi->v = vi0->v;
-  vi->nr = vi0->nr;
-  vi->i = vi->nr;
-  return vi;
+  // reuse ref
+  return (struct msstv_iter *)ref;
 }
 
   void
@@ -3770,7 +3807,6 @@ msstv_iter_destroy(struct msstv_iter * const vi)
 {
   if (msstv_iter_valid(vi))
     mssty_iter_park(&(vi->iter));
-  free(vi);
 }
 
   void
@@ -3836,7 +3872,7 @@ msstv_iter_release(struct msstv_iter * const vi, const u64 opaque)
   sst_blk_release(vi->v->rc, (const u8 *)opaque);
 }
 
-  static void
+  void
 msstv_iter_skip1(struct msstv_iter * const vi)
 {
   debug_assert(msstv_iter_valid(vi));
@@ -3901,6 +3937,17 @@ msstv_iter_seek_ts(struct msstv_iter * const vi, const struct kref * const key)
 }
 
   void
+msstv_iter_skip1_ts(struct msstv_iter * const vi)
+{
+  if (!msstv_iter_valid(vi))
+    return;
+
+  msstv_iter_skip1(vi);
+  while (msstv_iter_valid(vi) && msstv_iter_ts(vi))
+    msstv_iter_skip1(vi);
+}
+
+  void
 msstv_iter_skip_ts(struct msstv_iter * const vi, const u32 nr)
 {
   for (u32 i = 0; i < nr; i++) {
@@ -3917,7 +3964,7 @@ msstv_iter_skip_ts(struct msstv_iter * const vi, const u32 nr)
 msstv_iter_next_ts(struct msstv_iter * const vi, struct kv * const out)
 {
   struct kv * const ret = msstv_iter_peek(vi, out);
-  msstv_iter_skip_ts(vi, 1);
+  msstv_iter_skip1_ts(vi);
   return ret;
 }
 
@@ -4623,7 +4670,7 @@ msstz_comp_analyze(struct msstz_comp_info * const ci, const u64 ipart)
       newsz += (sst_kv_vi128_estimate(kv_inp) + sizeof(u16));
 
     newnr++;
-    api->iter_skip(iter, 1);
+    api->iter_skip1(iter);
   }
   newsz *= sample_skip;
   api->iter_destroy(iter);
@@ -4885,7 +4932,6 @@ msstz_comp_worker(void * const ptr)
     coq_uninstall();
     rcache_coq_destroy(coq);
   } else {
-    debug_assert(nco == 1);
     msstz_comp_worker_func(ci);
   }
   ci->stat_reads += ssty_build_ckeys_reads;
@@ -5033,6 +5079,7 @@ const struct kvmap_api kvmap_api_sst = {
   .iter_kvref = (void *)sst_iter_kvref,
   .iter_retain = (void *)sst_iter_retain,
   .iter_release = (void *)sst_iter_release,
+  .iter_skip1 = (void *)sst_iter_skip1,
   .iter_skip = (void *)sst_iter_skip,
   .iter_next = (void *)sst_iter_next,
   .iter_park = (void *)sst_iter_park,
@@ -5055,6 +5102,7 @@ const struct kvmap_api kvmap_api_msstx = {
   .iter_kvref = (void *)msstx_iter_kvref,
   .iter_retain = (void *)msstx_iter_retain,
   .iter_release = (void *)msstx_iter_release,
+  .iter_skip1 = (void *)msstx_iter_skip1,
   .iter_skip = (void *)msstx_iter_skip,
   .iter_next = (void *)msstx_iter_next,
   .iter_park = (void *)msstx_iter_park,
@@ -5076,6 +5124,7 @@ const struct kvmap_api kvmap_api_mssty = {
   .iter_kvref = (void *)mssty_iter_kvref,
   .iter_retain = (void *)mssty_iter_retain,
   .iter_release = (void *)mssty_iter_release,
+  .iter_skip1 = (void *)mssty_iter_skip1,
   .iter_skip = (void *)mssty_iter_skip,
   .iter_next = (void *)mssty_iter_next,
   .iter_park = (void *)mssty_iter_park,
@@ -5100,6 +5149,7 @@ const struct kvmap_api kvmap_api_mssty_ts = {
   .iter_kvref = (void *)mssty_iter_kvref,
   .iter_retain = (void *)mssty_iter_retain,
   .iter_release = (void *)mssty_iter_release,
+  .iter_skip1 = (void *)mssty_iter_skip1_ts,
   .iter_skip = (void *)mssty_iter_skip_ts,
   .iter_next = (void *)mssty_iter_next_ts,
   .iter_park = (void *)mssty_iter_park,
@@ -5123,6 +5173,7 @@ const struct kvmap_api kvmap_api_mssty_dup = {
   .iter_kvref = (void *)mssty_iter_kvref_dup,
   .iter_retain = (void *)mssty_iter_retain,
   .iter_release = (void *)mssty_iter_release,
+  .iter_skip1 = (void *)mssty_iter_skip1_dup,
   .iter_skip = (void *)mssty_iter_skip_dup,
   .iter_next = (void *)mssty_iter_next_dup,
   .iter_park = (void *)mssty_iter_park,
@@ -5146,6 +5197,7 @@ const struct kvmap_api kvmap_api_msstv = {
   .iter_kvref = (void *)msstv_iter_kvref,
   .iter_retain = (void *)msstv_iter_retain,
   .iter_release = (void *)msstv_iter_release,
+  .iter_skip1 = (void *)msstv_iter_skip1,
   .iter_skip = (void *)msstv_iter_skip,
   .iter_next = (void *)msstv_iter_next,
   .iter_park = (void *)msstv_iter_park,
@@ -5170,6 +5222,7 @@ const struct kvmap_api kvmap_api_msstv_ts = { // xdb
   .iter_kvref = (void *)msstv_iter_kvref,
   .iter_retain = (void *)msstv_iter_retain,
   .iter_release = (void *)msstv_iter_release,
+  .iter_skip1 = (void *)msstv_iter_skip1_ts,
   .iter_skip = (void *)msstv_iter_skip_ts,
   .iter_next = (void *)msstv_iter_next_ts,
   .iter_park = (void *)msstv_iter_park,

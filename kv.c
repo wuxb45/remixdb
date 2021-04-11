@@ -297,6 +297,7 @@ klen_compare(const u32 len1, const u32 len2)
 }
 
 // compare whether the two keys are identical
+// optimistic: do not check hash
   inline bool
 kv_match(const struct kv * const key1, const struct kv * const key2)
 {
@@ -305,6 +306,17 @@ kv_match(const struct kv * const key1, const struct kv * const key2)
   //  && (key1->klen == key2->klen)
   //  && (!memcmp(key1->kv, key2->kv, key1->klen));
   return (key1->klen == key2->klen) && (!memcmp(key1->kv, key2->kv, key1->klen));
+}
+
+// compare whether the two keys are identical
+// check hash first
+// pessimistic: return false quickly if their hashes mismatch
+  inline bool
+kv_match_hash(const struct kv * const key1, const struct kv * const key2)
+{
+  return (key1->hash == key2->hash)
+    && (key1->klen == key2->klen)
+    && (!memcmp(key1->kv, key2->kv, key1->klen));
 }
 
   inline bool
@@ -1020,7 +1032,7 @@ kvmap_dump_keys(const struct kvmap_api * const api, void * const map, const int 
     api->iter_kref(iter, &kref);
     dprintf(fd, "%010lu [%3u] %.*s\n", i, kref.len, kref.len, kref.ptr);
     i++;
-    api->iter_skip(iter, 1);
+    api->iter_skip1(iter);
   }
   api->iter_destroy(iter);
   kvmap_unref(api, ref);
@@ -1033,11 +1045,12 @@ kvmap_dump_keys(const struct kvmap_api * const api, void * const map, const int 
 // miter {{{
 struct miter_stream { // minheap
   struct kref kref;
-  void * iter;
-  void * ref;
-  void * map;
   const struct kvmap_api * api;
+  void * ref;
+  void * iter;
   u32 rank; // rank of this stream
+  bool private_ref;
+  bool private_iter;
 };
 
 // merging iterator
@@ -1138,8 +1151,59 @@ miter_stream_fix(struct miter_stream * const s)
   static void
 miter_stream_skip(struct miter_stream * const s)
 {
-  s->api->iter_skip(s->iter, 1);
+  s->api->iter_skip1(s->iter);
   miter_stream_fix(s);
+}
+
+  static bool
+miter_stream_add(struct miter * const miter, const struct kvmap_api * const api,
+    void * const ref, void * const iter, const bool private_ref, const bool private_iter)
+{
+  const u32 way = miter->nway + 1;
+
+  if (miter->mh[way] == NULL)
+    miter->mh[way] = malloc(sizeof(struct miter_stream));
+
+  struct miter_stream * const s = miter->mh[way];
+  if (s == NULL)
+    return false;
+
+  s->kref.ptr = NULL;
+  s->iter = iter;
+  s->ref = ref;
+  s->api = api;
+  s->rank = miter->nway; // rank starts with 0
+  s->private_ref = private_ref;
+  s->private_iter = private_iter;
+  miter->nway = way; // +1
+  return true;
+}
+
+  bool
+miter_add_iter(struct miter * const miter, const struct kvmap_api * const api, void * const ref, void * const iter)
+{
+  if (miter->nway >= MITER_MAX_STREAMS)
+    return NULL;
+
+  return miter_stream_add(miter, api, ref, iter, false, false);
+}
+
+  void *
+miter_add_ref(struct miter * const miter, const struct kvmap_api * const api, void * const ref)
+{
+  if (miter->nway >= MITER_MAX_STREAMS)
+    return NULL;
+
+  void * const iter = api->iter_create(ref);
+  if (iter == NULL)
+    return NULL;
+
+  const bool r = miter_stream_add(miter, api, ref, iter, false, true);
+  if (!r) {
+    api->iter_destroy(iter);
+    return NULL;
+  }
+  return iter;
 }
 
 // add lower-level stream first, and then moving up
@@ -1151,37 +1215,23 @@ miter_add(struct miter * const miter, const struct kvmap_api * const api, void *
 {
   if (miter->nway >= MITER_MAX_STREAMS)
     return NULL;
-  debug_assert(api);
 
   void * const ref = kvmap_ref(api, map);
   if (ref == NULL)
     return NULL;
+
   void * const iter = api->iter_create(ref);
   if (iter == NULL) {
     kvmap_unref(api, ref);
     return NULL;
   }
 
-  const u32 way = miter->nway+1;
-  if (miter->mh[way] == NULL)
-    miter->mh[way] = malloc(sizeof(struct miter_stream));
-
-  struct miter_stream * const s = miter->mh[way];
-  if (s == NULL) {
+  const bool r = miter_stream_add(miter, api, ref, iter, true, true);
+  if (!r) {
     api->iter_destroy(iter);
     kvmap_unref(api, ref);
     return NULL;
   }
-
-  s->kref.ptr = NULL;
-  s->iter = iter;
-  s->ref = ref;
-  s->map = map;
-  s->api = api;
-  s->rank = miter->nway; // rank starts with 0
-  miter->nway = way; // +1
-  //miter_stream_fix(s);
-  //miter_upheap(miter, miter->nway);
   return iter;
 }
 
@@ -1269,6 +1319,15 @@ miter_kvref(struct miter * const miter, struct kvref * const kvref)
 }
 
   void
+miter_skip1(struct miter * const miter)
+{
+  if (miter_valid(miter)) {
+    miter_stream_skip(miter->mh[1]);
+    miter_downheap(miter, 1);
+  }
+}
+
+  void
 miter_skip(struct miter * const miter, const u32 nr)
 {
   for (u32 i = 0; i < nr; i++) {
@@ -1285,7 +1344,7 @@ miter_next(struct miter * const miter, struct kv * const out)
   if (!miter_valid_1(miter))
     return NULL;
   struct kv * const ret = miter_peek(miter, out);
-  miter_skip(miter, 1);
+  miter_skip1(miter);
   return ret;
 }
 
@@ -1337,7 +1396,7 @@ miter_skip_unique(struct miter * const miter)
   struct miter_stream * const s0 = miter->mh[1];
   const bool unique0 = s0->api->unique;
   do {
-    miter_skip(miter, 1);
+    miter_skip1(miter);
     if (!miter_valid(miter))
       break;
     // try to avoid cmp with unique stream
@@ -1379,10 +1438,12 @@ miter_clean(struct miter * const miter)
 {
   miter_resume(miter); // resume refs if parked
   for (u32 i = 1; i <= miter->nway; i++) {
-    struct miter_stream * const stream = miter->mh[i];
-    const struct kvmap_api * const api = stream->api;
-    api->iter_destroy(stream->iter);
-    kvmap_unref(api, stream->ref);
+    struct miter_stream * const s = miter->mh[i];
+    const struct kvmap_api * const api = s->api;
+    if (s->private_iter)
+      api->iter_destroy(s->iter);
+    if (s->private_ref)
+      kvmap_unref(api, s->ref);
   }
   miter->nway = 0;
 }
