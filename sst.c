@@ -1791,7 +1791,8 @@ mssty_unref(struct mssty_ref * const ref)
 {
   struct mssty_iter * const iter = (typeof(iter))ref;
   struct msst * const msst = iter->msst;
-  mssty_iter_destroy(iter);
+  mssty_iter_park(iter);
+  free(iter);
   return msst;
 }
 
