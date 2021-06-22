@@ -490,12 +490,6 @@ bits_round_down_a(const u64 v, const u64 a);
 // simd {{{
   extern u32
 m128_movemask_u8(const m128 v);
-
-  extern u32
-m128_movemask_u16(const m128 v);
-
-  extern u32
-m128_movemask_u32(const m128 v);
 // }}} simd
 
 // vi128 {{{
