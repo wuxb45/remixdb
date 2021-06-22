@@ -3,6 +3,7 @@
  *
  * All rights reserved. No warranty, explicit or implicit, provided.
  */
+#define _GNU_SOURCE
 #include <stdio.h>
 
 #include "lib.h"
