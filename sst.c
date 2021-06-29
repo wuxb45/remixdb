@@ -3242,7 +3242,7 @@ ssty_build_api(struct msst * const msstx1, const u32 way0)
   struct kv * const tmp = malloc(sizeof(*last) + SST_MAX_KVSZ);
   last->klen = UINT32_MAX;
   bool overlap = false;
-  for (u32 i = way0; (i+1) < nway; i++) {
+  for (u32 i = way0; i < nway; i++) {
     if (msstx1->ssts[i].totkv == 0)
       continue;
 
