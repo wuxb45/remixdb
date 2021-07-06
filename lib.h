@@ -490,6 +490,12 @@ bits_round_down_a(const u64 v, const u64 a);
 // simd {{{
   extern u32
 m128_movemask_u8(const m128 v);
+
+//  extern u32
+//m128_movemask_u16(const m128 v);
+//
+//  extern u32
+//m128_movemask_u32(const m128 v);
 // }}} simd
 
 // vi128 {{{
@@ -761,6 +767,11 @@ strtoks_count(const char * const * const toks);
 // }}} string
 
 // qsbr {{{
+// QSBR vs EBR (Quiescent-State vs Epoch Based Reclaimation)
+// QSBR: readers just use qsbr_update -> qsbr_update -> ... repeatedly
+// EBR: readers use qsbr_update -> qsbr_park -> qsbr_resume -> qsbr_update -> ...
+// The advantage of EBR is qsbr_park can happen much earlier than the next qsbr_update
+// The disadvantage is the extra cost, a pair of park/resume is used in every iteration
 struct qsbr;
 struct qsbr_ref {
 #ifdef QSBR_DEBUG
@@ -772,21 +783,29 @@ struct qsbr_ref {
   extern struct qsbr *
 qsbr_create(void);
 
+// every READER accessing the shared data must first register itself with the qsbr
   extern bool
 qsbr_register(struct qsbr * const q, struct qsbr_ref * const qref);
 
   extern void
 qsbr_unregister(struct qsbr * const q, struct qsbr_ref * const qref);
 
+// For READER: mark the beginning of critical section; like rcu_read_lock()
   extern void
 qsbr_update(struct qsbr_ref * const qref, const u64 v);
 
+// temporarily stop access the shared data to avoid blocking writers
+// READER can use qsbr_park (like rcu_read_unlock()) in conjunction with qsbr_update
+// qsbr_park is roughly equivalent to qsbr_unregister, but faster
   extern void
 qsbr_park(struct qsbr_ref * const qref);
 
+// undo the effect of qsbr_park; must use it between qsbr_park and qsbr_update
+// qsbr_resume is roughly equivalent to qsbr_register, but faster
   extern void
 qsbr_resume(struct qsbr_ref * const qref);
 
+// WRITER: wait until all the readers have announced v=target with qsbr_update
   extern void
 qsbr_wait(struct qsbr * const q, const u64 target);
 

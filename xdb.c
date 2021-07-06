@@ -32,16 +32,17 @@ struct mt_pair {
 };
 
 struct wal {
-  int fds[2]; // use this
-  struct wring * wring;
-  u8 * buf; // wring_acquire()-ed
-  u64 bufoff; // in bytes <= WAL_BLKSZ
-  u64 woff; // a multiple of 4K (PGSZ)
-  u64 soff; // last sync offset, <= woff
-  u64 maxsz; // max file size
-  u64 write_user;
-  u64 write_nbytes;
-  u64 version;
+  u8 * buf; // wring_acquire()-ed; change on I/O
+  u64 bufoff; // in bytes <= WAL_BLKSZ; change on append
+  u64 woff; // a multiple of 4K (PGSZ); change on I/O
+  u64 soff; // last sync offset, <= woff; change on sync or every multiple I/O
+  u64 write_user; // stat on append
+  u64 write_nbytes; // stat on append
+  u64 version; // change on compaction
+
+  int fds[2]; // fixed
+  struct wring * wring; // fixed
+  u64 maxsz; // max file size; fixed
 };
 
 // map
@@ -50,21 +51,28 @@ struct xdb {
   struct mt_pair * volatile mt_view;
   u64 padding1[7];
 
-  struct qsbr * qsbr;
-  u64 mtsz; // memtable size
-  u64 max_mtsz;
-  struct msstz * z;
-  u64 max_rejsz;
-  u32 nr_workers;
-  u32 co_per_worker;
-  volatile bool running;
-  pthread_t comp_pid;
-  struct wal wal;
-
+  u64 mtsz; // memtable size; frequently changed by writers
+  struct wal wal; // frequently changed by writers
+  // not actively accessed
   void * mt1;
   void * mt2;
+  u32 nr_workers;
+  u32 co_per_worker;
+  char * worker_cores;
+  pthread_t comp_pid;
+
+  // read-only
+  u64 max_mtsz;
+  u64 max_rejsz;
+  struct qsbr * qsbr;
+  struct msstz * z;
   struct mt_pair mt_views[4];
-  u64 padding2[7];
+  int logfd;
+  volatile bool running;
+  bool tags; // use tags
+  bool padding2[2];
+
+  u64 padding3[7];
   spinlock lock;
 };
 
@@ -91,6 +99,7 @@ struct xdb_iter {
   struct xdb_ref * db_ref;
   struct mt_pair * mt_view; // the version used to create the miter
   struct miter * miter;
+  struct coq * coq_parked; // parked coq
 };
 // }}} struct
 
@@ -533,8 +542,7 @@ xdb_do_comp(struct xdb * const xdb, const u64 max_rejsz)
   xdb_unlock(xdb);
 
   // truncate old WAL after the io completion
-  const int logfd = msstz_logfd(xdb->z);
-  logger_printf(logfd, "%s discard wal fd %d sz0 %lu\n", __func__, xdb->wal.fds[1], walsz0);
+  logger_printf(xdb->logfd, "%s discard wal fd %d sz0 %lu\n", __func__, xdb->wal.fds[1], walsz0);
   ftruncate(xdb->wal.fds[1], 0);
   fdatasync(xdb->wal.fds[1]);
   const double t_sync = time_sec();
@@ -549,44 +557,55 @@ xdb_do_comp(struct xdb * const xdb, const u64 max_rejsz)
   const double comp_ra = (double)sst_read / (double)usr_write;
 
   const u64 mb = 1lu<<20;
-  logger_printf(logfd, "%s mtsz %lu walsz %lu write-mb usr %lu wal %lu sst %lu WA %.4lf comp-read-mb %lu RA %.4lf\n",
+  logger_printf(xdb->logfd, "%s mtsz %lu walsz %lu write-mb usr %lu wal %lu sst %lu WA %.4lf comp-read-mb %lu RA %.4lf\n",
       __func__, mtsz0, walsz0, usr_write/mb, wal_write/mb, sst_write/mb, sys_wa, sst_read/mb, comp_ra);
-  logger_printf(logfd, "%s times-ms total %.3lf prep %.3lf comp %.3lf reinsert %.3lf wait2 %.3lf clean %.3lf sync %.3lf\n",
+  logger_printf(xdb->logfd, "%s times-ms total %.3lf prep %.3lf comp %.3lf reinsert %.3lf wait2 %.3lf clean %.3lf sync %.3lf\n",
       __func__, t_clean-t0, t_prep-t0, t_comp-t_prep, t_reinsert-t_comp, t_wait2-t_reinsert, t_clean-t_wait2, t_sync-t_clean);
 }
 
-  static void *
-xdb_compaction_worker(void * const ptr)
+  static void
+xdb_compaction_worker_pin(struct xdb * const xdb)
 {
-  struct xdb * xdb = (typeof(xdb))ptr;
-  const int logfd = msstz_logfd(xdb->z);
-  // pin on cpus
-  char * env = getenv("XDB_CPU_LIST");
-  u32 cpus[XDB_COMP_CONC];
-  u32 nr = 0;
-  if (env) { // explicit cpu list
-    char ** const tokens = strtoks(env, ",");
+  if (!strcmp(xdb->worker_cores, "auto")) { // auto detect
+    u32 cores[64];
+    const u32 ncores = process_getaffinity_list(64, cores);
+    if (ncores < xdb->nr_workers)
+      logger_printf(xdb->logfd, "%s WARNING: too few cores: %u cores < %u workers\n", __func__, ncores, xdb->nr_workers);
+
+    const u32 nr = (ncores < XDB_COMP_CONC) ? ncores : XDB_COMP_CONC;
+    if (nr == 0) { // does this really happen?
+      logger_printf(xdb->logfd, "%s no cores\n", __func__);
+    } else if (nr < ncores) { // need to update affinity list
+      u32 cpus[XDB_COMP_CONC];
+      for (u32 i = 0; i < nr; i++)
+        cpus[i] = cores[ncores - nr + i];
+      thread_setaffinity_list(nr, cpus);
+      logger_printf(xdb->logfd, "%s cpus %u first %u (auto)\n", __func__, nr, cpus[0]);
+    } else {
+      logger_printf(xdb->logfd, "%s inherited\n", __func__);
+    }
+  } else if (strcmp(xdb->worker_cores, "dont")) { // not "dont"
+    char ** const tokens = strtoks(xdb->worker_cores, ",");
+    u32 nr = 0;
+    u32 cpus[XDB_COMP_CONC];
     while ((nr < XDB_COMP_CONC) && tokens[nr]) {
       cpus[nr] = a2u32(tokens[nr]);
       nr++;
     }
     free(tokens);
-    logger_printf(logfd, "%s cpus %s\n", __func__, env);
-  } else { // auto detection; use the last a few cpus
-    u32 cores[64];
-    const u32 ncores = process_getaffinity_list(64, cores);
-    nr = (ncores < XDB_COMP_CONC) ? ncores : XDB_COMP_CONC;
-    for (u32 i = 0; i < nr; i++)
-      cpus[i] = cores[ncores - nr + i];
-
-    if (nr == 0) {
-      nr = 1;
-      cpus[0] = 0;
-    }
-    logger_printf(logfd, "%s cpus %u first %u (auto)\n", __func__, nr, cpus[0]);
+    thread_setaffinity_list(nr, cpus);
+    logger_printf(xdb->logfd, "%s pinning cpus %u arg %s\n", __func__, nr, xdb->worker_cores);
+  } else {
+    logger_printf(xdb->logfd, "%s unpinned (dont)\n", __func__);
   }
-  thread_setaffinity_list(nr, cpus);
   thread_set_name(pthread_self(), "xdb_comp");
+}
+
+  static void *
+xdb_compaction_worker(void * const ptr)
+{
+  struct xdb * const xdb = (typeof(xdb))ptr;
+  xdb_compaction_worker_pin(xdb);
 
   while (true) {
     // while running and does not need compaction
@@ -599,7 +618,7 @@ xdb_compaction_worker(void * const ptr)
       break;
 
     const u64 dt = time_diff_nsec(t0);
-    logger_printf(logfd, "%s compaction worker wait-ms %lu\n", __func__, dt / 1000000);
+    logger_printf(xdb->logfd, "%s compaction worker wait-ms %lu\n", __func__, dt / 1000000);
     xdb_do_comp(xdb, xdb->max_rejsz);
   }
 
@@ -721,8 +740,7 @@ xdb_recover_fd(struct xdb * const xdb, const int fd)
   wmt_api->unref(wmt_ref);
   munmap(mem, fsize);
   const u64 rsize = (u64)(iter - mem);
-  const int logfd = msstz_logfd(xdb->z);
-  logger_printf(logfd, "%s fd %d fsize %lu rsize %lu nkeys %lu\n", __func__, fd, fsize, rsize, nkeys);
+  logger_printf(xdb->logfd, "%s fd %d fsize %lu rsize %lu nkeys %lu\n", __func__, fd, fsize, rsize, nkeys);
   return rsize;
 }
 
@@ -740,19 +758,18 @@ xdb_wal_recover(struct xdb * const xdb)
   const bool two = vs[0] && vs[1]; // both are non-zero
   const u64 v0 = msstz_version(xdb->z);
   debug_assert(v0);
-  const int logfd = msstz_logfd(xdb->z);
-  logger_printf(logfd, "%s wal1 %lu wal2 %lu zv %lu\n", __func__, vs[0], vs[1], v0);
+  logger_printf(xdb->logfd, "%s wal1 %lu wal2 %lu zv %lu\n", __func__, vs[0], vs[1], v0);
 
   // will recover fds[1] fist, then fds[0] if necessary, then keep using fds[0] since it's probably still half-full
   if (vs[0] < vs[1]) { // swap
-    logger_printf(logfd, "%s use wal2 %lu\n", __func__, vs[1]);
+    logger_printf(xdb->logfd, "%s use wal2 %lu\n", __func__, vs[1]);
     wal->version = vs[1];
     const int fd1 = wal->fds[0];
     wal->fds[0]= wal->fds[1];
     wal->fds[1] = fd1;
     wring_update_fd(wal->wring, wal->fds[0]);
   } else {
-    logger_printf(logfd, "%s use wal1 %lu\n", __func__, vs[0]);
+    logger_printf(xdb->logfd, "%s use wal1 %lu\n", __func__, vs[0]);
     wal->version = vs[0];
   }
 
@@ -777,7 +794,7 @@ xdb_wal_recover(struct xdb * const xdb)
     memcpy(wal->buf, &v1, sizeof(v1));
     wal->bufoff = sizeof(v1);
     wal->version = v1;
-    logger_printf(logfd, "%s wal comp zv0 %lu zv1 %lu rec %lu %lu mtsz %lu fd0 %d\n",
+    logger_printf(xdb->logfd, "%s wal comp zv0 %lu zv1 %lu rec %lu %lu mtsz %lu fd0 %d\n",
         __func__, v0, v1, r1, r0, xdb->mtsz, wal->fds[0]);
   } else { // one or no valid logs
     const u64 rsize = xdb_recover_fd(xdb, wal->fds[0]);
@@ -785,7 +802,7 @@ xdb_wal_recover(struct xdb * const xdb)
       memcpy(wal->buf, &v0, sizeof(v0));
       wal->bufoff = sizeof(v0);
       wal->version = v0;
-      logger_printf(logfd, "%s wal empty v %lu mtsz %lu fd %d\n", __func__, v0, xdb->mtsz, wal->fds[0]);
+      logger_printf(xdb->logfd, "%s wal empty v %lu mtsz %lu fd %d\n", __func__, v0, xdb->mtsz, wal->fds[0]);
     } else { // reuse the existing wal
       // only one WAL: WAL version <= Z version
       if (wal->version > v0)
@@ -799,7 +816,7 @@ xdb_wal_recover(struct xdb * const xdb)
         pwrite(wal->fds[0], zeroes, nr, (off_t)rsize);
         fdatasync(wal->fds[0]);
       }
-      logger_printf(logfd, "%s wal rsize %lu woff %lu mtsz %lu fd %d\n", __func__, rsize, wal->woff, xdb->mtsz, wal->fds[0]);
+      logger_printf(xdb->logfd, "%s wal rsize %lu woff %lu mtsz %lu fd %d\n", __func__, rsize, wal->woff, xdb->mtsz, wal->fds[0]);
     }
     ftruncate(wal->fds[1], 0); // truncate the second wal anyway
     fdatasync(wal->fds[1]);
@@ -811,7 +828,7 @@ xdb_wal_recover(struct xdb * const xdb)
 // open close {{{
   struct xdb *
 xdb_open(const char * const dir, const size_t cache_size_mb, const size_t mt_size_mb, const size_t wal_size_mb,
-    const u32 nr_workers, const u32 co_per_worker, const bool ckeys)
+    const bool ckeys, const bool tags, const u32 nr_workers, const u32 co_per_worker, const char * const worker_cores)
 {
   mkdir(dir, 00755);
   struct xdb * const xdb = yalloc(sizeof(*xdb));
@@ -832,7 +849,7 @@ xdb_open(const char * const dir, const size_t cache_size_mb, const size_t mt_siz
   xdb->mt_views[3] = (struct mt_pair){.wmt = xdb->mt1, .imt = xdb->mt2, .next = &xdb->mt_views[0]};
   xdb->mt_view = xdb->mt_views; // [0]
 
-  xdb->z = msstz_open(dir, cache_size_mb, ckeys);
+  xdb->z = msstz_open(dir, cache_size_mb, ckeys, tags);
   xdb->qsbr = qsbr_create();
 
   // just a warning
@@ -847,6 +864,8 @@ xdb_open(const char * const dir, const size_t cache_size_mb, const size_t mt_siz
   spinlock_init(&xdb->lock);
   xdb->nr_workers = nr_workers; // internal parallelism
   xdb->co_per_worker = co_per_worker;
+  xdb->worker_cores = strdup(worker_cores);
+  xdb->logfd = msstz_logfd(xdb->z);
   xdb->running = true;
 
   const bool wal_ok = wal_open(&xdb->wal, dir);
@@ -887,6 +906,7 @@ xdb_close(struct xdb * xdb)
   wal_close(&xdb->wal);
   wmt_api->destroy(xdb->mt1);
   wmt_api->destroy(xdb->mt2);
+  free(xdb->worker_cores);
   free(xdb);
 }
 // }}} open close
@@ -918,7 +938,7 @@ xdb_get(struct xdb_ref * const ref, const struct kref * const kref, struct kv * 
 
   // wmt
   struct xdb_get_info info = {out, NULL};
-  if (wmt_api->inpr(ref->wmt_ref, kref, &xdb_inp_get, &info)) {
+  if (wmt_api->inpr(ref->wmt_ref, kref, xdb_inp_get, &info)) {
     xdb_ref_leave(ref);
     return info.ret;
   }
@@ -926,7 +946,7 @@ xdb_get(struct xdb_ref * const ref, const struct kref * const kref, struct kv * 
 
   // imt
   if (ref->imt_ref) {
-    if (imt_api->inpr(ref->imt_ref, kref, &xdb_inp_get, &info))
+    if (imt_api->inpr(ref->imt_ref, kref, xdb_inp_get, &info))
       return info.ret;
   }
   // not in log, maybe in ssts
@@ -948,14 +968,14 @@ xdb_probe(struct xdb_ref * const ref, const struct kref * const kref)
   xdb_ref_enter(ref);
 
   bool is_valid;
-  if (wmt_api->inpr(ref->wmt_ref, kref, &xdb_inp_probe, &is_valid)) {
+  if (wmt_api->inpr(ref->wmt_ref, kref, xdb_inp_probe, &is_valid)) {
     xdb_ref_leave(ref);
     return is_valid;
   }
   xdb_ref_leave(ref);
 
   if (ref->imt_ref) {
-    if (imt_api->inpr(ref->imt_ref, kref, &xdb_inp_probe, &is_valid))
+    if (imt_api->inpr(ref->imt_ref, kref, xdb_inp_probe, &is_valid))
       return is_valid;
   }
   return msstv_probe_ts(ref->vref, kref);
@@ -991,15 +1011,14 @@ xdb_mt_update_func(struct kv * const kv0, void * const priv)
   const size_t newsz = sst_kv_size(ctx->newkv);
   const size_t oldsz = kv0 ? sst_kv_size(kv0) : 0;
   const size_t diffsz = newsz - oldsz;
-  debug_assert(xdb->mtsz >= oldsz);
 
   xdb_lock(xdb);
   if (unlikely(xdb->mt_view != ctx->mt_view)) {
     // abort
     xdb_unlock(xdb);
-    return kv0;
+    return NULL;
   }
-
+  debug_assert(xdb->mtsz >= oldsz);
   xdb->mtsz += diffsz;
   xdb->wal.write_user += newsz;
   wal_append(&xdb->wal, ctx->newkv);
@@ -1059,6 +1078,105 @@ xdb_sync(struct xdb_ref * const ref)
 }
 // }}} set del
 
+// merge {{{
+// caller needs to free the returned kv
+  static struct kv *
+xdb_merge_get_old(struct xdb_ref * const ref, const struct kref * const kref)
+{
+  struct xdb_get_info info = {NULL, NULL}; // no out
+  // imt
+  if (ref->imt_ref) {
+    if (imt_api->inpr(ref->imt_ref, kref, xdb_inp_get, &info))
+      return info.ret;
+  }
+  // not in log, maybe in ssts
+  struct kv * const ret = msstv_get_ts(ref->vref, kref, NULL);
+  ret->hash = kv_crc32c_extend(kref->hash32);
+  return ret;
+}
+
+struct xdb_rmw_ctx {
+  struct xdb_mt_merge_ctx mt_ctx; // newkv, xdb, mt_view, success
+  kv_merge_func uf;
+  void * const priv;
+  struct kv * oldkv; // func2 only
+  bool merged; // func1 only
+};
+
+// kv_merge_func
+  static struct kv *
+xdb_merge_merge_func(struct kv * const kv0, void * const priv)
+{
+  struct xdb_rmw_ctx * const ctx = priv;
+  struct kv * const oldkv = kv0 ? kv0 : ctx->oldkv;
+  struct kv * const ukv = ctx->uf(oldkv, ctx->priv);
+  if (ukv == NULL) { // read-only
+    ctx->merged = true;
+    return NULL;
+  }
+
+  // reuse kv0 if possible
+  struct kv * const newkv = (ukv != kv0) ? xdb_dup_kv(ukv) : ukv;
+  ctx->mt_ctx.newkv = newkv;
+
+  struct kv * const ret = xdb_mt_update_func(kv0, &ctx->mt_ctx);
+  if (ctx->mt_ctx.success)
+    ctx->merged = true;
+  else if (ukv != kv0)
+    free(newkv);
+
+  return ret;
+}
+
+// only do merge if the key is found
+// kv_merge_func
+  static struct kv *
+xdb_merge_merge_func1(struct kv * const kv0, void * const priv)
+{
+  struct xdb_rmw_ctx * const ctx = priv;
+  if (kv0 == NULL) { // not found: return and merge with an old value if possible
+    ctx->mt_ctx.success = true; // return with merged == false
+    return NULL;
+  }
+
+  return xdb_merge_merge_func(kv0, priv);
+}
+
+  bool
+xdb_merge(struct xdb_ref * const ref, const struct kref * const kref, kv_merge_func uf, void * const priv)
+{
+  debug_assert(kref && uf);
+  xdb_write_enter(ref);
+
+  struct xdb_rmw_ctx ctx = {.mt_ctx = {.xdb = ref->xdb}, .uf = uf, .priv = priv};
+
+  bool s;
+  do {
+    xdb_ref_update_version(ref);
+    xdb_ref_enter(ref);
+    ctx.mt_ctx.mt_view = ref->mt_view;
+    s = wmt_api->merge(ref->wmt_ref, kref, xdb_merge_merge_func1, &ctx);
+    xdb_ref_leave(ref);
+  } while (s && !ctx.mt_ctx.success);
+
+  if (ctx.merged || (!s))
+    return s;
+  // not found in the wmt
+  ctx.mt_ctx.success = false;
+
+  do {
+    xdb_ref_update_version(ref);
+    ctx.oldkv = xdb_merge_get_old(ref, kref);
+    xdb_ref_enter(ref);
+    ctx.mt_ctx.mt_view = ref->mt_view;
+    s = wmt_api->merge(ref->wmt_ref, kref, xdb_merge_merge_func, &ctx);
+    xdb_ref_leave(ref);
+    free(ctx.oldkv); // could be NULL
+  } while (s && !ctx.merged);
+  return s;
+}
+// }}} merge
+
 // iter {{{
   static void
 xdb_iter_miter_ref(struct xdb_iter * const iter)
@@ -1117,12 +1235,24 @@ xdb_iter_skip_ts(struct xdb_iter * const iter)
 xdb_iter_park(struct xdb_iter * const iter)
 {
   miter_park(iter->miter);
+
+  if (iter->coq_parked) {
+    coq_install(iter->coq_parked);
+    iter->coq_parked = NULL;
+  }
 }
 
   void
 xdb_iter_seek(struct xdb_iter * const iter, const struct kref * const key)
 {
   xdb_iter_update_version(iter);
+
+  struct coq * const coq = coq_current();
+  if (coq) {
+    iter->coq_parked = coq;
+    coq_uninstall();
+  }
+
   miter_seek(iter->miter, key);
   xdb_iter_skip_ts(iter);
 }
@@ -1186,12 +1316,19 @@ xdb_iter_next(struct xdb_iter * const iter, struct kv * const out)
 xdb_iter_destroy(struct xdb_iter * const iter)
 {
   miter_destroy(iter->miter);
+
+  if (iter->coq_parked) {
+    coq_install(iter->coq_parked);
+    iter->coq_parked = NULL;
+  }
+
   free(iter);
 }
 // }}} iter
 
 // api {{{
 const struct kvmap_api kvmap_api_xdb = {
+  .hashkey = true,
   .ordered = true,
   .threadsafe = true,
   .unique = true,
@@ -1199,6 +1336,7 @@ const struct kvmap_api kvmap_api_xdb = {
   .probe = (void*)xdb_probe,
   .set = (void*)xdb_set,
   .del = (void*)xdb_del,
+  .merge = (void*)xdb_merge,
   .sync = (void*)xdb_sync,
   .ref = (void*)xdb_ref,
   .unref = (void*)xdb_unref,
@@ -1221,41 +1359,58 @@ const struct kvmap_api kvmap_api_xdb = {
 xdb_kvmap_api_create(const char * const name, const struct kvmap_mm * const mm, char ** const args)
 {
   (void)mm;
-  if (!strcmp(name, "xdbx")) {
-    return xdb_open(args[0], a2u64(args[1]), a2u64(args[2]), a2u64(args[3]), a2u32(args[4]), a2u32(args[5]), args[6][0] != '0');
-  } else if (!strcmp(name, "xdb")) {
-    return xdb_open(args[0], a2u64(args[1]), 4096, 8192, 4, 1, true); // 4 threads by default
-    //return xdb_open(args[0], a2u64(args[1]), 4096, 8192, 4, 4, false); // x4 co-per-thr if not using ckeys
-  } else {
-    return NULL;
+  if (!strcmp(name, "xdb")) {
+    const char * const dir = args[0];
+    const size_t cache_size_mb = a2u64(args[1]);
+    const size_t mt_size_mb = a2u64(args[2]);
+    const size_t wal_size_mb = (strcmp(args[3], "auto") == 0) ? (mt_size_mb << 1) : a2u64(args[3]);
+    const bool ckeys = args[4][0] != '0';
+    const bool tags = args[5][0] != '0';
+    const u32 nr_workers = (strcmp(args[6], "auto") == 0) ? 4 : a2u32(args[6]);
+    const u32 co_per_worker = (strcmp(args[7], "auto") == 0) ? (ckeys ? 1 : 4) : a2u32(args[7]);
+    const char * const worker_cores = args[8];
+    return xdb_open(dir, cache_size_mb, mt_size_mb, wal_size_mb, ckeys, tags, nr_workers, co_per_worker, worker_cores);
+
+  } else if (!strcmp(name, "xdbauto")) {
+    const char * const dir = args[0];
+    const size_t cache_size_mb = a2u64(args[1]);
+    const size_t mt_size_mb = a2u64(args[2]);
+    const bool tags = args[3][0] != '0';
+    return xdb_open(dir, cache_size_mb, mt_size_mb, mt_size_mb << 1, true, tags, 4, 1, "auto");
   }
+  return NULL;
 }
 
 __attribute__((constructor))
   static void
 xdb_kvmap_api_init(void)
 {
-  kvmap_api_register(2, "xdb", "<path> <cache-mb>", xdb_kvmap_api_create, &kvmap_api_xdb);
-  kvmap_api_register(7, "xdbx", "<path> <cache-mb> <mt-mb> <wal-mb> <nr-workers> <co-per-worker> <copy-keys(0/1)>",
+  kvmap_api_register(9, "xdb", "<path> <cache-mb> <mt-mb> <wal-mb/auto> <ckeys(0/1)> <tags(0/1)>"
+      " <nr-workers/auto> <co-per-worker/auto> <worker-cores/auto/dont>",
+      xdb_kvmap_api_create, &kvmap_api_xdb);
+
+  kvmap_api_register(4, "xdbauto", "<path> <cache-mb> <mt-mb> <tags(0/1)>",
       xdb_kvmap_api_create, &kvmap_api_xdb);
 }
 // }}}
 
 // remixdb {{{
-// The default
+// The default: generate ckeys and tags: fast but consumes slightly more memory/disk space
+// use xdb_open for more options
   struct xdb *
-remixdb_open(const char * const dir, const size_t cache_size_mb, const size_t mt_size_mb)
+remixdb_open(const char * const dir, const size_t cache_size_mb, const size_t mt_size_mb, const bool tags)
 {
-  return xdb_open(dir, cache_size_mb, mt_size_mb, mt_size_mb << 1, 4, 1, true);
+  return xdb_open(dir, cache_size_mb, mt_size_mb, mt_size_mb << 1, true, tags, 4, 1, "auto");
 }
 
 // This mode provides SLIGHTLY lower WA and lower disk usage;
 // However, compaction can be slower if your workload exhibit poor write locality
+// hash-tags are also disabled so point queries will be much slower
 // You should use this mode only when the disk space is REALLY limited
   struct xdb *
 remixdb_open_compact(const char * const dir, const size_t cache_size_mb, const size_t mt_size_mb)
 {
-  return xdb_open(dir, cache_size_mb, mt_size_mb, mt_size_mb << 1, 4, 4, false);
+  return xdb_open(dir, cache_size_mb, mt_size_mb, mt_size_mb << 1, false, false, 4, 4, "auto");
 }
 
   struct xdb_ref *
@@ -1342,7 +1497,7 @@ remixdb_get(struct xdb_ref * const ref, const void * const kbuf, const u32 klen,
 
   // wmt
   struct remixdb_get_info info = {vbuf_out, vlen_out};
-  if (wmt_api->inpr(ref->wmt_ref, &kref, &remixdb_inp_get, &info)) {
+  if (wmt_api->inpr(ref->wmt_ref, &kref, remixdb_inp_get, &info)) {
     xdb_ref_leave(ref);
     return (*vlen_out) != SST_VLEN_TS;
   }
@@ -1350,7 +1505,7 @@ remixdb_get(struct xdb_ref * const ref, const void * const kbuf, const u32 klen,
 
   // imt
   if (ref->imt_ref) {
-    if (imt_api->inpr(ref->imt_ref, &kref, &remixdb_inp_get, &info))
+    if (imt_api->inpr(ref->imt_ref, &kref, remixdb_inp_get, &info))
       return (*vlen_out) != SST_VLEN_TS;
   }
   // not in log, maybe in ssts

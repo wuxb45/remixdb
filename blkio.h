@@ -58,6 +58,13 @@ coq_create(void);
   extern void
 coq_destroy(struct coq * const coq);
 
+// prefer io_uring on Linux; fall back to POSIX AIO
+  extern struct coq *
+coq_create_auto(const u32 depth);
+
+  extern void
+coq_destroy_auto(struct coq * const coq);
+
   extern u32
 corq_enqueue(struct coq * const q, struct co * const co);
 
@@ -122,12 +129,6 @@ rcache_create(const u64 size_mb, const u32 fd_bits);
 
   extern void
 rcache_destroy(struct rcache * const c);
-
-  extern struct coq *
-rcache_coq_create(const u32 depth);
-
-  extern void
-rcache_coq_destroy(struct coq * const coq);
 
   extern void
 rcache_close_lazy(struct rcache * const c, const int fd);

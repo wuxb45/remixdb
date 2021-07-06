@@ -18,7 +18,7 @@ main(int argc, char** argv)
     return 0;
   }
 
-  struct xdb * const xdb = remixdb_open(argv[1], a2u64(argv[2]), a2u64(argv[3]));
+  struct xdb * const xdb = remixdb_open(argv[1], a2u64(argv[2]), a2u64(argv[3]), true);
   if (!xdb) {
     fprintf(stderr, "xdb_open failed\n");
     return 0;

@@ -19,7 +19,7 @@ struct xdb_iter;
 // xdb {{{
   extern struct xdb *
 xdb_open(const char * const dir, const size_t cache_size_mb, const size_t mt_size_mb, const size_t wal_size_mb,
-    const u32 nr_workers, const u32 co_per_worker, const bool ckeys);
+    const bool ckeys, const bool tags, const u32 nr_workers, const u32 co_per_worker, const char * const worker_cores);
 
   extern void
 xdb_close(struct xdb * const xdb);
@@ -45,6 +45,17 @@ xdb_del(struct xdb_ref * const ref, const struct kref * const kref);
 
   extern void
 xdb_sync(struct xdb_ref * const ref);
+
+// AKA Atomic Read-Modify-Write
+// A merge can fail without doing anything due to allocate failures
+// uf() can be invoked multiple times due to abort and retry (these are not errors)
+// The last invocation will take the actual effect if it is successful
+// The returned kvs will be ignored except for the last one (returned by the last call to uf)
+// Mempry allocated by uf must be freed by the caller after xdb_merge has returned
+// The uf can perform in-place update if kv0 is not NULL (just return kv0 from uf())
+// An in-place update may still cause an memtable insertion if kv0 was not from the memtable (from a partition)
+  extern bool
+xdb_merge(struct xdb_ref * const ref, const struct kref * const kref, kv_merge_func uf, void * const priv);
 
 // iter
   extern struct xdb_iter *
@@ -85,7 +96,7 @@ extern const struct kvmap_api kvmap_api_xdb;
 
 // remixdb {{{
   extern struct xdb *
-remixdb_open(const char * const dir, const size_t cache_size_mb, const size_t mt_size_mb);
+remixdb_open(const char * const dir, const size_t cache_size_mb, const size_t mt_size_mb, const bool tags);
 
   extern struct xdb *
 remixdb_open_compact(const char * const dir, const size_t cache_size_mb, const size_t mt_size_mb);

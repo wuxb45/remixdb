@@ -24,10 +24,6 @@ sst_kv_vi128_encode(u8 * ptr, const struct kv * const kv);
   extern size_t
 sst_kv_size(const struct kv * const kv);
 
-  extern u64
-sst_kvmap_estimate(const struct kvmap_api * const api, void * const map,
-    const struct kref * const k0, const struct kref * const kz);
-
   extern struct kv *
 sst_kvref_dup2_kv(struct kvref * const kvref, struct kv * const out);
 // }}} kv
@@ -238,24 +234,6 @@ mssty_ref(struct msst * const msst);
   extern struct msst *
 mssty_unref(struct mssty_ref * const ref);
 
-  extern struct kv *
-mssty_get(struct mssty_ref * const ref, const struct kref * const key, struct kv * const out);
-
-  extern bool
-mssty_probe(struct mssty_ref * const ref, const struct kref * const key);
-
-// return NULL for tomestone
-  extern struct kv *
-mssty_get_ts(struct mssty_ref * const ref, const struct kref * const key, struct kv * const out);
-
-// return false for tomestone
-  extern bool
-mssty_probe_ts(struct mssty_ref * const ref, const struct kref * const key);
-
-  extern bool
-mssty_get_value_ts(struct mssty_ref * const ref, const struct kref * const key,
-    void * const vbuf_out, u32 * const vlen_out);
-
   extern struct mssty_iter *
 mssty_iter_create(struct mssty_ref * const ref);
 
@@ -336,6 +314,26 @@ mssty_iter_kref_dup(struct mssty_iter * const iter, struct kref * const kref);
   extern bool
 mssty_iter_kvref_dup(struct mssty_iter * const iter, struct kvref * const kvref);
 
+// mssty_get can return tombstone
+  extern struct kv *
+mssty_get(struct mssty_ref * const ref, const struct kref * const key, struct kv * const out);
+
+// mssty_probe can return tombstone
+  extern bool
+mssty_probe(struct mssty_ref * const ref, const struct kref * const key);
+
+// return NULL for tomestone
+  extern struct kv *
+mssty_get_ts(struct mssty_ref * const ref, const struct kref * const key, struct kv * const out);
+
+// return false for tomestone
+  extern bool
+mssty_probe_ts(struct mssty_ref * const ref, const struct kref * const key);
+
+  extern bool
+mssty_get_value_ts(struct mssty_ref * const ref, const struct kref * const key,
+    void * const vbuf_out, u32 * const vlen_out);
+
   extern struct kv *
 mssty_first(struct msst * const msst, struct kv * const out);
 
@@ -351,7 +349,7 @@ mssty_dump(struct msst * const msst, const char * const fn);
 // y0 and way0 are optional for speeding up the sorting
   extern u32
 ssty_build(const char * const dirname, struct msst * const msst,
-    const u64 seq, const u32 way, struct msst * const y0, const u32 way0);
+    const u64 seq, const u32 way, struct msst * const y0, const u32 way0, const bool tags);
 // }}} build-ssty
 
 // msstv {{{
@@ -471,7 +469,7 @@ msstv_anchors(struct msstv * const v);
 struct msstz;
 
   extern struct msstz *
-msstz_open(const char * const dirname, const u64 cache_size_mb, const bool ckeys);
+msstz_open(const char * const dirname, const u64 cache_size_mb, const bool ckeys, const bool tags);
 
   extern void
 msstz_destroy(struct msstz * const z);

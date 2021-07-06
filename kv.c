@@ -1028,9 +1028,9 @@ kvmap_dump_keys(const struct kvmap_api * const api, void * const map, const int 
   api->iter_seek(iter, kref_null());
   u64 i = 0;
   while (api->iter_valid(iter)) {
-    struct kref kref;
-    api->iter_kref(iter, &kref);
-    dprintf(fd, "%010lu [%3u] %.*s\n", i, kref.len, kref.len, kref.ptr);
+    struct kvref kvref;
+    api->iter_kvref(iter, &kvref);
+    dprintf(fd, "%010lu [%3u] %.*s [%u]\n", i, kvref.hdr.klen, kvref.hdr.klen, kvref.kptr, kvref.hdr.vlen);
     i++;
     api->iter_skip1(iter);
   }

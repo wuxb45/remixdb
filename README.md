@@ -6,7 +6,9 @@ This repository maintains a reference implementation of the REMIX index data str
 as well as a thread-safe embedded key-value store implementation, namely RemixDB.
 It compiles on recent Linux/FreeBSD/MacOS and supports x86\_64 and AArch64 CPUs.
 
-# Optimization: Minimizing REMIX (Re-)Building Cost
+This code repository is being actively maintained and contains optimizations beyong the original RemixDB implementation.
+
+# Optimization 1: Minimizing REMIX (Re-)Building Cost
 
 This implementation employs an optimization to minimize the REMIX building cost.
 This optimization improves the throughput by 2x (0.96MOPS vs. 0.50MOPS) in a random-write experiment, compared to the implementation described in the REMIX paper.
@@ -33,6 +35,19 @@ You should use `remixdb_open` unless it's absolutely necessary to save a little 
 `remixdb_open_compact` opens a remixdb with the optimization turned off. Each newly created sstable will not contain a CKB.
 A store created by one of these functions can be safely opened by the other function.
 
+# Optimization 2: Improving Point Query with Hash Tags
+
+A point query in the original RemixDB performs binary search in a segment, which takes about five key comparisons and can cost multiple I/Os.
+The current implementation provides a new option, named `tags` (the last argument of `remixdb_open`).
+
+With this option enabled, every new REMIX will store an array of 8-bit hash tags. Each tag corresponds to a key managed by the REMIX.
+A point query (GET/PROBE) will first locate the target segment as usual.
+ Then it will check the tags to find candidate keys for full-key matching without using binary search in the segment.
+With 8-bit tags and at most 32 keys in a segment, a point query takes about 1.06 key comparisons if the key is found,
+and about 0.12 key comparisons if the key does not exist.
+
+TODO: the tags can also be used to speed up iterator seeks with existing keys.
+
 # Limitations of the Current Implementation
 
 * *KV size*: The maximum key+value size is capped at 65500 bytes.
@@ -49,15 +64,15 @@ By default, RemixDB pins 4 compaction threads on the last four cores of the curr
 For example, on a machine with two 10-core processors, cores 0,2,4,...,16,18 belong to numa node 0,
 and the rest cores belong to numa node 1.
 The default behavior is to use the cores from 16 to 19, which is a suboptimal setup.
-To avoid the performance penalty, one should set environment variable `XDB_CPU_LIST=core1,core2,...`
-to specify the cores used by the background threads.
-There can be up to four compaction threads. The default number is four.
-A preferred setup for the machine mentioned above would be like this:
+To avoid the performance penalty, one should use `numactl` to specify the cpu affinity.
 
 ```
-$ export XDB_CPU_LIST=12,14,16,18
-$ numactl -C 0,2,4,6 ./xdbdemo.out
+$ numactl -C 0,2,4,6,8 ./xdbdemo.out    # compaction threads on 2,4,6,8
+
+$ numactl -C 0,2,4,6,8,10,12,14 ./xdbtest.out 256 18 18 100    # user threads on 0,2,4,6; compaction threads on 8,10,12,14
 ```
+
+The worker threads affinity can also be explicitly specified using `xdb_open`.
 
 ## Maximum number of open files
 The current implementation keeps every table file open at run time.
@@ -109,13 +124,11 @@ Suppose you have eight cores (0...7) in total, the best practice is to let the t
 Run with a 4GB block cache, 4GB MemTables, and a dataset with 32 million KVs (2^25), performing 1 million updates in each round (2^20):
 
     $ make M=j xdbtest.out
-    $ export XDB_CPU_LIST=4,5,6,7
-    $ numactl -C 0,1,2,3 ./xdbtest.out /tmp/xdbtest 4096 25 20
+    $ numactl -N 0 ./xdbtest.out /tmp/xdbtest 4096 25 20 100
 
 To run with smaller memory footprint (a 256MB block cache, 256MB Memtables, and 1 million KVs):
 
-    $ export XDB_CPU_LIST=4,5,6,7
-    $ numactl -C 0,1,2,3 ./xdbtest.out /tmp/xdbtest 256 20 20
+    $ numactl -N 0 ./xdbtest.out /tmp/xdbtest 256 20 20 100
 
 This setup consumes up to 850MB memory (RSS) and 1.8GB space in /tmp/xdbtest.
 

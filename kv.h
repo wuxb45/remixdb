@@ -322,7 +322,12 @@ kv128_size(const u8 * const ptr);
 // kvmap_api {{{
 typedef void (* kv_inp_func)(struct kv * const curr, void * const priv);
 
-// merge() will do SET if the kv_merge_func() returns a kv; do nothing if NULL (no deletion)
+// the merge function should:
+// 1: return NULL if the origin kv is not changed at all
+// 2: return kv0 if updates has been applied in-place
+// 3: return a different kv if the original kv must be replaced
+// In an in-memory kvmap, 2==1 and no further action is needed
+// In a persistent kv store with a memtable, 2 will need an insertion if kv0 is not from the memtable
 typedef struct kv * (* kv_merge_func)(struct kv * const kv0, void * const priv);
 
 struct kvmap_api {
@@ -334,7 +339,7 @@ struct kvmap_api {
   bool irefsafe; // true: iter's kref/kvref can be safely accessed after iter_seek/iter_skip/iter_park
   bool unique; // provide unique keys, especially for iterators
   bool refpark; // ref has park() and resume()
-  bool reserved;
+  bool async; // XXX for testing KVell
 
   // set (aka put/upsert): return true on success; false on error
   // mm.in() controls how things move into the kvmap; the default mm make a copy with malloc()
@@ -454,11 +459,11 @@ kvmap_ref(const struct kvmap_api * const api, void * const map);
 kvmap_unref(const struct kvmap_api * const api, void * const ref);
 
   extern struct kv *
-kvmap_kv_get(const struct kvmap_api * const api, void * const map,
+kvmap_kv_get(const struct kvmap_api * const api, void * const ref,
     const struct kv * const key, struct kv * const out);
 
   extern bool
-kvmap_kv_probe(const struct kvmap_api * const api, void * const map,
+kvmap_kv_probe(const struct kvmap_api * const api, void * const ref,
     const struct kv * const key);
 
   extern bool
@@ -466,15 +471,15 @@ kvmap_kv_set(const struct kvmap_api * const api, void * const ref,
     struct kv * const kv);
 
   extern bool
-kvmap_kv_del(const struct kvmap_api * const api, void * const map,
+kvmap_kv_del(const struct kvmap_api * const api, void * const ref,
     const struct kv * const key);
 
   extern bool
-kvmap_kv_inpr(const struct kvmap_api * const api, void * const map,
+kvmap_kv_inpr(const struct kvmap_api * const api, void * const ref,
     const struct kv * const key, kv_inp_func uf, void * const priv);
 
   extern bool
-kvmap_kv_inpw(const struct kvmap_api * const api, void * const map,
+kvmap_kv_inpw(const struct kvmap_api * const api, void * const ref,
     const struct kv * const key, kv_inp_func uf, void * const priv);
 
   extern bool
@@ -490,23 +495,23 @@ kvmap_kv_iter_seek(const struct kvmap_api * const api, void * const iter,
     const struct kv * const key);
 
   extern struct kv *
-kvmap_raw_get(const struct kvmap_api * const api, void * const map,
+kvmap_raw_get(const struct kvmap_api * const api, void * const ref,
     const u32 len, const u8 * const ptr, struct kv * const out);
 
   extern bool
-kvmap_raw_probe(const struct kvmap_api * const api, void * const map,
+kvmap_raw_probe(const struct kvmap_api * const api, void * const ref,
     const u32 len, const u8 * const ptr);
 
   extern bool
-kvmap_raw_del(const struct kvmap_api * const api, void * const map,
+kvmap_raw_del(const struct kvmap_api * const api, void * const ref,
     const u32 len, const u8 * const ptr);
 
   extern bool
-kvmap_raw_inpr(const struct kvmap_api * const api, void * const map,
+kvmap_raw_inpr(const struct kvmap_api * const api, void * const ref,
     const u32 len, const u8 * const ptr, kv_inp_func uf, void * const priv);
 
   extern bool
-kvmap_raw_inpw(const struct kvmap_api * const api, void * const map,
+kvmap_raw_inpw(const struct kvmap_api * const api, void * const ref,
     const u32 len, const u8 * const ptr, kv_inp_func uf, void * const priv);
 
   extern void

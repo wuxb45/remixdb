@@ -692,14 +692,16 @@ pages_do_alloc(const size_t size, const int flags)
   return p;
 }
 
-#if defined(__linux__)
+#if defined(__linux__) && defined(MAP_HUGETLB)
+
 #if defined(MAP_HUGE_SHIFT)
 #define PAGES_FLAGS_1G ((MAP_HUGETLB | (30 << MAP_HUGE_SHIFT)))
 #define PAGES_FLAGS_2M ((MAP_HUGETLB | (21 << MAP_HUGE_SHIFT)))
-#else
+#else // MAP_HUGE_SHIFT
 #define PAGES_FLAGS_1G ((MAP_HUGETLB))
 #define PAGES_FLAGS_2M ((MAP_HUGETLB))
-#endif
+#endif // MAP_HUGE_SHIFT
+
 #else
 #define PAGES_FLAGS_1G ((0))
 #define PAGES_FLAGS_2M ((0))
@@ -2011,6 +2013,30 @@ m128_movemask_u8(const m128 v)
   return (u32)vaddvq_u16(vandq_u16(vreinterpretq_u16_u8(perm), mbits));
 #endif // __x86_64__
 }
+
+//// max 0xff (x8)
+//  u32
+//m128_movemask_u16(const m128 v)
+//{
+//#if defined(__x86_64__)
+//  return _pext_u32((u32)_mm_movemask_epi8(v), 0xaaaau);
+//#elif defined(__aarch64__)
+//  static const uint16x8_t mbits = {1, 2, 4, 8, 16, 32, 64, 128};
+//  return (u32)vaddvq_u16(vandq_u16(vreinterpretq_u16_u8(v), mbits));
+//#endif // __x86_64__
+//}
+//
+//// max 0xf (x4)
+//  u32
+//m128_movemask_u32(const m128 v)
+//{
+//#if defined(__x86_64__)
+//  return _pext_u32((u32)_mm_movemask_epi8(v), 0x8888u);
+//#elif defined(__aarch64__)
+//  static const uint32x4_t mbits = {1, 2, 4, 8};
+//  return (u32)vaddvq_u32(vandq_u32(vreinterpretq_u32_u8(v), mbits));
+//#endif // __x86_64__
+//}
 // }}} simd
 
 // vi128 {{{
@@ -3019,7 +3045,7 @@ strhex_64(void * const out, u64 v)
 {
 #if defined(__x86_64__)
   const m128 str = strhex_helper(v);
-  _mm_store_si128(out, str);
+  _mm_storeu_si128(out, str);
 #elif defined(__aarch64__)
   const m128 str = strhex_helper(v);
   vst1q_u8(out, str);

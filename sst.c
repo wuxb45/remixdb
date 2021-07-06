@@ -39,7 +39,7 @@ static_assert(SSTY_DBITS >= 4 && SSTY_DBITS <= 5, "Supported SSTY_DBITS: 4 and 5
 #define SSTY_MMAP_FLAGS ((MAP_PRIVATE))
 #endif
 
-// turn on IO-optimized binary search by default
+// turn on IO-optimized binary search by default; comment out to disable
 #define MSSTY_SEEK_BISECT_OPT
 
 #define MSSTZ_NBLKS ((20400)) // slightly smaller than 20480
@@ -75,36 +75,6 @@ sst_kv_vi128_encode(u8 * ptr, const struct kv * const kv)
 sst_kv_size(const struct kv * const kv)
 {
   return sizeof(*kv) + kv->klen + (kv->vlen & SST_VLEN_MASK);
-}
-
-// estimate the size of kvs in a range
-  u64
-sst_kvmap_estimate(const struct kvmap_api * const api, void * const map,
-    const struct kref * const k0, const struct kref * const kz)
-{
-  void * const ref = kvmap_ref(api, map);
-  void * const iter = api->iter_create(ref);
-  u64 est = 0;
-  struct kv * kz_inp = NULL;
-  if (kz) {
-    api->iter_seek(iter, kz);
-    api->iter_inp(iter, kvmap_inp_steal_kv, &kz_inp);
-  }
-
-  api->iter_seek(iter, k0);
-  while (api->iter_valid(iter)) {
-    struct kv * kv_inp = NULL;
-    api->iter_inp(iter, kvmap_inp_steal_kv, &kv_inp);
-    if (kv_inp == kz_inp)
-      break;
-    est += sst_kv_vi128_estimate(kv_inp);
-    est += sizeof(u16);
-    api->iter_skip1(iter);
-  }
-
-  api->iter_destroy(iter);
-  kvmap_unref(api, ref);
-  return est;
 }
 
   struct kv *
@@ -210,6 +180,7 @@ sst_init_at(const int dfd, const u64 seq, const u32 way, struct sst * const sst)
   if (mem == MAP_FAILED)
     return false;
 
+  debug_assert(mem);
   sst->mem = mem;
   sst->fsize = (u32)fsize;
   const struct sst_meta * const meta = sst_meta(sst);
@@ -268,12 +239,11 @@ sst_open(const char * const dirname, const u64 seq, const u32 way)
 }
 
   static inline u32
-k128_search_le(const u8 * const base, const u32 * const ioffs,
-    const struct kref * const key, const size_t headersize, u32 l, u32 r)
+k128_search_le(const u8 * const base, const u32 * const ioffs, const struct kref * const key, u32 l, u32 r)
 {
   while ((l + 1) < r) {
     const u32 m = (l + r) >> 1;
-    const int cmp = kref_k128_compare(key, base + headersize + ioffs[m]);
+    const int cmp = kref_k128_compare(key, base + ioffs[m]);
     if (cmp < 0) // search-key < [m]
       r = m;
     else if (cmp > 0) // search-key > [m]
@@ -287,7 +257,7 @@ k128_search_le(const u8 * const base, const u32 * const ioffs,
   static u16
 sst_search_blkid(struct sst * const map, const struct kref * const key)
 {
-  const u32 ikeyid = k128_search_le(map->mem, map->ioffs, key, sizeof(u16), 0, map->inr);
+  const u32 ikeyid = k128_search_le(map->mem + sizeof(u16), map->ioffs, key, 0, map->inr);
   const u16 blkid = *(const u16 *)(map->mem + map->ioffs[ikeyid]);
   return blkid;
 }
@@ -298,6 +268,7 @@ sst_blk_acquire(struct sst * const map, const u32 blkid)
 {
   if (map->rc && (map->bms[blkid].nblks == 1)) {
     const u8 * const ptr = rcache_acquire(map->rc, map->fd, blkid);
+    debug_assert(ptr);
     return ptr;
   }
   return map->mem + (PGSZ * blkid);
@@ -356,7 +327,6 @@ sst_get(struct sst * const map, const struct kref * const key, struct kv * const
 
   // search in the block
   const u8 * const blk = sst_blk_acquire(map, blkid);
-  debug_assert(blk);
   const u32 r = sst_search_block_ge(blk, key);
   if ((r >> 31) == 0) { // not found
     sst_blk_release(map->rc, blk);
@@ -386,7 +356,6 @@ sst_probe(struct sst * const map, const struct kref * const key)
 
   // search in the block
   const u8 * const blk = sst_blk_acquire(map, blkid);
-  debug_assert(blk);
   const u32 r = sst_search_block_ge(blk, key);
   sst_blk_release(map->rc, blk);
   return (r >> 31);
@@ -524,9 +493,9 @@ kvenc_append_raw(struct kvenc * const enc, const void * const data, const u32 si
 }
 
   static void
-kvenc_append_bool(struct kvenc * const enc, const bool v)
+kvenc_append_u8(struct kvenc * const enc, const u8 v)
 {
-  kvenc_append_raw(enc, &v, sizeof(bool));
+  kvenc_append_raw(enc, &v, sizeof(v));
 }
 
   static inline void
@@ -757,7 +726,7 @@ sst_build_at(const int dfd, struct miter * const miter,
       const u32 slen = curr->klen - lcp;
       kvenc_append_vi128(kenc, lcp); // prefix length
       kvenc_append_vi128(kenc, slen); // suffix length
-      kvenc_append_bool(kenc, curr->vlen == SST_VLEN_TS);
+      kvenc_append_u8(kenc, curr->vlen == SST_VLEN_TS ? 1 : 0);
       kvenc_append_raw(kenc, curr->kv + lcp, slen);
     }
     // remember last key in tmp0
@@ -1482,13 +1451,13 @@ msstx_iter_destroy(struct msstx_iter * const iter)
 
 // ssty {{{
 struct ssty_meta {
-  u32 nway;
-  u32 nkidx;
-  u32 padding;
-  u32 ptroff;
-  u32 inr1;
+  u32 nway; // 0 to MSST_NWAY
+  u32 nkidx; // size of the ranks array
+  u32 tagoff; // (optional) hash tag array if not zero
+  u32 ptroff; // cursor offsets
+  u32 inr1; // number of L1 index keys; number of blocks; <= 4KB blocks
   u32 ioff1;
-  u32 inr2;
+  u32 inr2; // number of L2 index keys (much smaller)
   u32 ioff2;
 
   u32 totkv; // total number, including stale keys and tombstones
@@ -1506,12 +1475,13 @@ struct ssty {
   size_t size;
   u32 nway;
   u32 nkidx; // number of entries (including placeholders)
-  u32 inr; // number of index entries
-  u32 inr2;
+  u32 inr1; // meta->inr1
+  u32 inr2; // meta->inr2
   const struct sst_ptr * ptrs; // array of seek pointers
-  const u32 * ioffs; // index offs
-  const u32 * ioffs2;
+  u32 ioff1; // meta->ioff1
+  u32 ioff2; // meta->ioff2
   //u64 magic; // seq * 100 + nway
+  const u8 * tags; // (optional) 16-bit non-zero hash tags
   const struct ssty_meta * meta;
   //const struct sst_blkmeta * bms[MSST_NWAY];
 };
@@ -1539,6 +1509,7 @@ ssty_open_at(const int dfd, const u64 seq, const u32 nway)
   if (mem == MAP_FAILED)
     return NULL;
 
+  debug_assert(mem);
   struct ssty * const ssty = calloc(1, sizeof(*ssty));
 
   ssty->mem = mem;
@@ -1547,11 +1518,12 @@ ssty_open_at(const int dfd, const u64 seq, const u32 nway)
   const struct ssty_meta * const meta = (typeof(meta))(mem + fsize - sizeof(*meta));
   ssty->nway = meta->nway;
   ssty->nkidx = meta->nkidx;
-  ssty->ptrs = (struct sst_ptr *)(mem + meta->ptroff); // size1
-  ssty->inr = meta->inr1; // nsecs
-  ssty->ioffs = (const u32 *)(mem + meta->ioff1); // ioffsoff
+  ssty->ptrs = (struct sst_ptr *)(mem + meta->ptroff); // size0+size1
+  ssty->inr1 = meta->inr1; // nsecs
+  ssty->ioff1 = meta->ioff1; // ioffsoff
   ssty->inr2 = meta->inr2; // ipages
-  ssty->ioffs2 = (const u32 *)(mem + meta->ioff2); // ioffsoff2
+  ssty->ioff2 = meta->ioff2; // ioffsoff2
+  ssty->tags = meta->tagoff ? (typeof(ssty->tags))(mem + meta->tagoff) : NULL;
   ssty->meta = meta;
   debug_assert(ssty->meta->magic == magic);
   return ssty;
@@ -1579,9 +1551,23 @@ ssty_destroy(struct ssty * const ssty)
   void
 ssty_fprint(struct ssty * const ssty, FILE * const fout)
 {
-  fprintf(fout, "%s magic %lu nway %u nkidx %u inr %u %u filesz %zu\n",
+  const double bpk = (double)(ssty->size << 3) / (double)ssty->meta->totkv;
+  fprintf(fout, "%s magic %lu nway %u nkidx %u inr1 %u inr2 %u filesz %zu tags %c bits/key %.1lf\n",
       __func__, ssty->meta->magic, ssty->nway, ssty->nkidx,
-      ssty->inr, ssty->inr2, ssty->size);
+      ssty->inr1, ssty->inr2, ssty->size, ssty->tags ? 'y' : 'n', bpk);
+}
+
+  static inline u32
+ssty_search_index(const struct ssty * const ssty, const struct kref * const key)
+{
+  // use two-level index
+  // i2: the first 8 bytes are two u32 for [start, end) of i1 (plr)
+  const u32 * const ioffs2 = (const u32 *)(ssty->mem + ssty->ioff2);
+  const u32 sidx2 = k128_search_le(ssty->mem + sizeof(u32) + sizeof(u32), ioffs2, key, 0, ssty->inr2);
+  const u32 * const plr = (typeof(plr))(ssty->mem + ioffs2[sidx2]);
+  const u32 * const ioffs1 = (const u32 *)(ssty->mem + ssty->ioff1);
+  const u32 sidx = k128_search_le(ssty->mem, ioffs1, key, plr[0], plr[1]);
+  return sidx;
 }
 
   static u32
@@ -1597,31 +1583,31 @@ ssty_ranks_match_mask(const u8 * const ranks, const u8 rank)
   return (u32)_mm256_movemask_epi8(_mm256_cmpeq_epi8(tmpv, rankv));
 #else // No __AVX2__, use SSE 4.2
   const m128 maskv = _mm_set1_epi8(SSTY_RANK);
-  const m128 rankv = _mm_set1_epi8(rank);
-  const m128 tmpv0 = _mm_and_si128(_mm_load_si128((const void *)ranks), maskv);
-  const m128 tmpv1 = _mm_and_si128(_mm_load_si128((const void *)(ranks+sizeof(m128))), maskv);
-  const u32 masklo = m128_movemask_u8(_mm_cmpeq_epi8(tmpv0, rankv));
-  const u32 maskhi = m128_movemask_u8(_mm_cmpeq_epi8(tmpv1, rankv));
+  const m128 rankv = _mm_set1_epi8((char)rank);
+  const m128 tmpvlo = _mm_and_si128(_mm_load_si128((const void *)ranks), maskv);
+  const m128 tmpvhi = _mm_and_si128(_mm_load_si128((const void *)(ranks + sizeof(m128))), maskv);
+  const u32 masklo = m128_movemask_u8(_mm_cmpeq_epi8(tmpvlo, rankv));
+  const u32 maskhi = m128_movemask_u8(_mm_cmpeq_epi8(tmpvhi, rankv));
   return (maskhi << sizeof(m128)) | masklo;
 #endif // __AVX2__
 #elif SSTY_DBITS == 4
   const m128 maskv = _mm_set1_epi8(SSTY_RANK);
-  const m128 rankv = _mm_set1_epi8(rank);
+  const m128 rankv = _mm_set1_epi8((char)rank);
   const m128 tmpv = _mm_and_si128(_mm_load_si128((const void *)ranks), maskv);
   return (u32)_mm_movemask_epi8(_mm_cmpeq_epi8(tmpv, rankv));
 #endif // SSTY_DBITS
 
 #elif defined(__aarch64__)
   const m128 maskv = vdupq_n_u8(SSTY_RANK);
-  const m128 d = vdupq_n_u8(rank);
+  const m128 rankv = vdupq_n_u8(rank);
 #if SSTY_DBITS == 5
-  const m128 cmplo = vceqq_u8(vandq_u8(vld1q_u8(ranks), maskv), d); // cmpeq => 0xff or 0x00
-  const m128 cmphi = vceqq_u8(vandq_u8(vld1q_u8(ranks + sizeof(m128)), maskv), d); // cmpeq => 0xff or 0x00
+  const m128 cmplo = vceqq_u8(vandq_u8(vld1q_u8(ranks), maskv), rankv); // cmpeq => 0xff or 0x00
+  const m128 cmphi = vceqq_u8(vandq_u8(vld1q_u8(ranks + sizeof(m128)), maskv), rankv); // cmpeq => 0xff or 0x00
   const u32 masklo = m128_movemask_u8(cmplo);
   const u32 maskhi = m128_movemask_u8(cmphi);
   return (maskhi << sizeof(m128)) | masklo;
 #elif SSTY_DBITS == 4
-  const m128 cmp = vceqq_u8(vandq_u8(vld1q_u8(ranks), maskv), d); // cmpeq => 0xff or 0x00
+  const m128 cmp = vceqq_u8(vandq_u8(vld1q_u8(ranks), maskv), rankv); // cmpeq => 0xff or 0x00
   return m128_movemask_u8(cmp);
 #endif // SSTY_DBITS
 
@@ -1633,6 +1619,64 @@ ssty_ranks_count(const u8 * const ranks, const u32 nr, const u8 rank)
 {
   const u32 mask = ssty_ranks_match_mask(ranks, rank) & (((u32)(1lu << nr)) - 1u);
   return (u32)__builtin_popcount(mask);
+}
+
+  static u8
+ssty_tag(const u32 hash32)
+{
+  return (u8)hash32;
+}
+
+// find the matching tags and filter out stale keys
+  static u32
+ssty_tags_match_mask(const u8 * const tags, const u8 * const ranks, const u8 tag)
+{
+#if defined(__x86_64__)
+
+#if SSTY_DBITS == 5
+#if defined(__AVX2__)
+  // stale -> 0xFF
+  const m256 maskv = _mm256_cmpgt_epi8(_mm256_setzero_si256(), _mm256_load_si256((const void *)ranks));
+  // match -> 0xFF
+  const m256 matchv = _mm256_cmpeq_epi8(_mm256_load_si256((const void *)tags), _mm256_set1_epi8((char)tag));
+  // (not stale) && match -> 0xFF -> bit
+  return (u32)_mm256_movemask_epi8(_mm256_andnot_si256(maskv, matchv));
+#else // No __AVX2__, use SSE 4.2
+  const m128 zerov = _mm_setzero_si128();
+  const m128 maskvlo = _mm_cmpgt_epi8(zerov, _mm_load_si128((const void *)ranks));
+  const m128 maskvhi = _mm_cmpgt_epi8(zerov, _mm_load_si128((const void *)(ranks + sizeof(m128))));
+  const m128 tagv = _mm_set1_epi8((char)tag);
+  const m128 matchvlo = _mm_cmpeq_epi8(_mm_load_si128((const void *)tags), tagv);
+  const m128 matchvhi = _mm_cmpeq_epi8(_mm_load_si128((const void *)(tags + sizeof(m128))), tagv);
+  const u32 masklo = m128_movemask_u8(_mm_andnot_si128(maskvlo, matchvlo));
+  const u32 maskhi = m128_movemask_u8(_mm_andnot_si128(maskvhi, matchvhi));
+  return (maskhi << sizeof(m128)) | masklo;
+#endif // __AVX2__
+#elif SSTY_DBITS == 4
+  // stale -> 0xFF
+  const m128 maskv = _mm_cmpgt_epi8(_mm_setzero_si128(), _mm_load_si128((const void *)ranks));
+  const m128 matchv = _mm_cmpeq_epi8(_mm_load_si128((const void *)tags), _mm_set1_epi8((char)tag));
+  return (u32)_mm_movemask_epi8(_mm_andnot_si128(maskv, matchv));
+#endif // SSTY_DBITS
+
+#elif defined(__aarch64__)
+  const m128 stalev = vdupq_n_u8(SSTY_STALE);
+  const m128 tagv = vdupq_n_u8(tag);
+#if SSTY_DBITS == 5
+  const m128 maskvlo = vcltq_u8(vld1q_u8(ranks), stalev);
+  const m128 maskvhi = vcltq_u8(vld1q_u8(ranks + sizeof(m128)), stalev);
+  const m128 matchvlo = vceqq_u8(vld1q_u8(tags), tagv);
+  const m128 matchvhi = vceqq_u8(vld1q_u8(tags + sizeof(m128)), tagv);
+  const u32 masklo = m128_movemask_u8(vandq_u8(maskvlo, matchvlo));
+  const u32 maskhi = m128_movemask_u8(vandq_u8(maskvhi, matchvhi));
+  return (maskhi << sizeof(m128)) | masklo;
+#elif SSTY_DBITS == 4
+  const m128 maskv = vcltq_u8(vld1q_u8(ranks), stalev);
+  const m128 matchv = vceqq_u8(vld1q_u8(tags), tagv);
+  return m128_movemask_u8(vandq_u8(maskv, matchv));
+#endif // SSTY_DBITS
+
+#endif // __x86_64__
 }
 // }}} ssty
 
@@ -1648,6 +1692,7 @@ struct mssty_iter {
   struct sst_iter iters[MSST_NWAY];
 };
 
+// misc {{{
   static bool
 mssty_open_y_at(const int dfd, struct msst * const msst)
 {
@@ -1722,6 +1767,15 @@ mssty_fprint(struct msst * const msst, FILE * const fout)
     sst_fprint(&(msst->ssts[i]), fout);
 }
 
+  struct mssty_iter *
+mssty_iter_create(struct mssty_ref * const ref)
+{
+  // ref is already an iter
+  return (struct mssty_iter *)ref;
+}
+// }}} misc
+
+// helpers {{{
   static void
 mssty_iter_init(struct mssty_iter * const iter, struct msst * const msst)
 {
@@ -1796,104 +1850,18 @@ mssty_unref(struct mssty_ref * const ref)
   return msst;
 }
 
+// to randomly access a sst_iter in a segment
   static struct sst_iter *
-mssty_iter_iter(struct mssty_iter * const iter)
+mssty_iter_access(struct mssty_iter * const iter, const u8 * const ranks, const u32 i)
 {
-  const u8 rankenc = iter->ssty->ranks[iter->kidx];
-  debug_assert((rankenc & SSTY_STALE) == 0);
-  return &(iter->iters[rankenc & SSTY_RANK]);
-}
-
-// can return tombstone
-  struct kv *
-mssty_get(struct mssty_ref * const ref, const struct kref * const key, struct kv * const out)
-{
-  struct mssty_iter * const iter = (typeof(iter))ref;
-  mssty_iter_seek(iter, key);
-  if (!mssty_iter_valid(iter))
-    return NULL;
-
-  struct sst_iter * const iter1 = mssty_iter_iter(iter);
+  const u8 rank = ranks[i] & SSTY_RANK;
+  struct sst_iter * const iter1 = &(iter->iters[rank]);
+  mssty_iter_set_ptr(iter1, iter->seek_ptrs[rank]);
+  const u32 nskip = ssty_ranks_count(ranks, i, rank);
+  sst_iter_skip(iter1, nskip);
+  debug_assert(sst_iter_valid(iter1));
   sst_iter_fix_kv(iter1);
-  struct kv * const ret = sst_iter_match_kref(iter1, key) ? sst_iter_peek(iter1, out) : NULL;
-  sst_iter_park(iter1);
-  return ret;
-}
-
-// can return tombstone
-  bool
-mssty_probe(struct mssty_ref * const ref, const struct kref * const key)
-{
-  struct mssty_iter * const iter = (typeof(iter))ref;
-  mssty_iter_seek(iter, key);
-  if (!mssty_iter_valid(iter))
-    return false;
-
-  struct sst_iter * const iter1 = mssty_iter_iter(iter);
-  sst_iter_fix_kv(iter1);
-  const bool r = sst_iter_match_kref(iter1, key);
-  sst_iter_park(iter1);
-  return r;
-}
-
-// return NULL for tomestone
-  struct kv *
-mssty_get_ts(struct mssty_ref * const ref, const struct kref * const key, struct kv * const out)
-{
-  struct mssty_iter * const iter = (typeof(iter))ref;
-  mssty_iter_seek(iter, key);
-  if ((!mssty_iter_valid(iter)) || mssty_iter_ts(iter))
-    return NULL;
-
-  struct sst_iter * const iter1 = mssty_iter_iter(iter);
-  sst_iter_fix_kv(iter1);
-  struct kv * const ret = sst_iter_match_kref(iter1, key) ? sst_iter_peek(iter1, out) : NULL;
-  sst_iter_park(iter1); // seek can only acquire iter1
-  return ret;
-}
-
-// return false for tomestone
-  bool
-mssty_probe_ts(struct mssty_ref * const ref, const struct kref * const key)
-{
-  struct mssty_iter * const iter = (typeof(iter))ref;
-  mssty_iter_seek(iter, key);
-  if ((!mssty_iter_valid(iter)) || mssty_iter_ts(iter))
-    return false;
-
-  struct sst_iter * const iter1 = mssty_iter_iter(iter);
-  sst_iter_fix_kv(iter1);
-  const bool r = sst_iter_match_kref(iter1, key);
-  sst_iter_park(iter1); // seek can only acquire iter1
-  return r;
-}
-
-// return false for tomestone
-  bool
-mssty_get_value_ts(struct mssty_ref * const ref, const struct kref * const key,
-    void * const vbuf_out, u32 * const vlen_out)
-{
-  struct mssty_iter * const iter = (typeof(iter))ref;
-  mssty_iter_seek(iter, key);
-  if ((!mssty_iter_valid(iter)) || mssty_iter_ts(iter))
-    return false;
-
-  struct sst_iter * const iter1 = mssty_iter_iter(iter);
-  sst_iter_fix_kv(iter1);
-  const bool r = sst_iter_match_kref(iter1, key);
-  if (r) {
-    memcpy(vbuf_out, iter1->kvdata + iter1->klen, iter1->vlen);
-    *vlen_out = iter1->vlen;
-  }
-  sst_iter_park(iter1); // seek can only acquire iter1
-  return r;
-}
-
-  struct mssty_iter *
-mssty_iter_create(struct mssty_ref * const ref)
-{
-  // ref is already an iter
-  return (struct mssty_iter *)ref;
+  return iter1;
 }
 
   inline bool
@@ -1915,17 +1883,6 @@ mssty_iter_skip_rank(struct mssty_iter * const iter, const u8 rank, const u32 nr
 {
   debug_assert(rank < MSST_NWAY);
   sst_iter_skip(&(iter->iters[rank]), nr);
-}
-
-  static inline u32
-mssty_search_index(const struct ssty * const ssty, const struct kref * const key)
-{
-  // use two-level index
-  // i2: the first 8 bytes are two u32 for [start, end) of i1 (plr)
-  const u32 sidx2 = k128_search_le(ssty->mem, ssty->ioffs2, key, 8, 0, ssty->inr2);
-  const u32 * const plr = (typeof(plr))(ssty->mem + ssty->ioffs2[sidx2]);
-  const u32 sidx = k128_search_le(ssty->mem, ssty->ioffs, key, 0, plr[0], plr[1]);
-  return sidx;
 }
 
 // does not check iter_valid
@@ -1954,7 +1911,9 @@ mssty_iter_skip1(struct mssty_iter * const iter)
     mssty_iter_fix_rank(iter, rank);
   }
 }
+// }}} helpers
 
+// seek {{{
   static u32
 mssty_iter_seek_bisect(struct mssty_iter * const iter, const struct kref * const key, const u32 aidx, u32 l, u32 r)
 {
@@ -1977,20 +1936,21 @@ mssty_iter_seek_bisect(struct mssty_iter * const iter, const struct kref * const
 
   while (l < r) {
 #ifdef MSSTY_SEEK_BISECT_OPT
-    const u8 rankx = ranks[(l+r)>>1] & SSTY_RANK;
+    const u8 rankx = ranks[(l+r)>>1] & SSTY_RANK; // pick up a rank randomly
     struct sst_iter * const iterx = &(iter->iters[rankx]);
     mssty_iter_set_ptr(iterx, iter->seek_ptrs[rankx]);
     debug_assert(sst_iter_valid(iterx));
+    // scan from l to r; skip 0 to l
     // use 1lu << r to avoid undefined behavior of left-shift by 32
-    u32 mask = ssty_ranks_match_mask(ranks, rankx) & (((u32)(1lu << r)) - 1u);
+    const u32 mask0 = ssty_ranks_match_mask(ranks, rankx) & (((u32)(1lu << r)) - 1u);
     debug_assert(l < SSTY_DIST);
     const u32 low = (1u << l) - 1u;
-    const u32 nskip0 = (u32)__builtin_popcount(mask & low);
+    const u32 nskip0 = (u32)__builtin_popcount(mask0 & low);
     if (nskip0)
       sst_iter_skip(iterx, nskip0);
-    mask &= (~low); // clear the low bits
+    u32 mask = mask0 & (~low); // bits between l and r
     debug_assert(mask); // have at least one bit
-    do {
+    do { // scan one by one
       sst_iter_fix_kv(iterx);
       const int cmp = sst_iter_compare_kref(iterx, key);
       const u32 m = (u32)__builtin_ctz(mask);
@@ -2030,14 +1990,7 @@ mssty_iter_seek_bisect(struct mssty_iter * const iter, const struct kref * const
     // compare
     debug_assert(l <= m && m < r);
     debug_assert((ranks[m] & SSTY_STALE) == 0);
-    const u8 rankm = ranks[m] & SSTY_RANK;
-    struct sst_iter * const iterm = &(iter->iters[rankm]);
-    // set iter for random access [rankm]
-    mssty_iter_set_ptr(iterm, iter->seek_ptrs[rankm]);
-    const u32 nskip = ssty_ranks_count(ranks, m, rankm);
-    sst_iter_skip(iterm, nskip);
-    debug_assert(sst_iter_valid(iterm));
-    sst_iter_fix_kv(iterm);
+    struct sst_iter * const iterm = mssty_iter_access(iter, ranks, m);
     const int cmp = sst_iter_compare_kref(iterm, key);
     sst_iter_park(iterm);
 
@@ -2105,8 +2058,8 @@ mssty_iter_seek(struct mssty_iter * const iter, const struct kref * const key)
   struct ssty * const ssty = iter->ssty;
   mssty_iter_park(iter);
   iter->valid_bm = 0;
-  const u32 sidx = mssty_search_index(ssty, key);
-  if (unlikely(sidx >= ssty->inr)) { // invalid
+  const u32 sidx = ssty_search_index(ssty, key);
+  if (unlikely(sidx >= ssty->inr1)) { // invalid
     iter->kidx = ssty->nkidx;
     return;
   }
@@ -2114,7 +2067,9 @@ mssty_iter_seek(struct mssty_iter * const iter, const struct kref * const key)
   const u32 kidx0 = sidx << SSTY_DBITS;
   mssty_iter_seek_local(iter, key, kidx0);
 }
+// }}} seek
 
+// seek-near {{{
   static u32
 mssty_iter_seek_index_near(struct ssty * const ssty, const struct kref * const key, u32 l)
 {
@@ -2124,10 +2079,11 @@ mssty_iter_seek_index_near(struct ssty * const ssty, const struct kref * const k
     return l;
 
   // linear scan
+  const u32 * const ioffs = (const u32 *)(ssty->mem + ssty->ioff1);
   u32 g = l >> SSTY_DBITS;
   u32 r = (g + 1) << SSTY_DBITS;
   while (r < ssty->nkidx) {
-    const int cmp = kref_k128_compare(key, ssty->mem + ssty->ioffs[g + 1]);
+    const int cmp = kref_k128_compare(key, ssty->mem + ioffs[g + 1]);
     if (cmp < 0) {
       break;
     } else {
@@ -2204,7 +2160,9 @@ mssty_iter_seek_near(struct mssty_iter * const iter, const struct kref * const k
     mssty_iter_seek_local_near(iter, key, l);
   }
 }
+// }}} seek-near
 
+// iter {{{
 // peek non-stale keys
   struct kv *
 mssty_iter_peek(struct mssty_iter * const iter, struct kv * const out)
@@ -2300,7 +2258,9 @@ mssty_iter_destroy(struct mssty_iter * const iter)
 {
   mssty_iter_park(iter);
 }
+// }}} iter
 
+// ts {{{
 // ts iter: ignore a key if its newest version is a tombstone
   bool
 mssty_iter_ts(struct mssty_iter * const iter)
@@ -2347,9 +2307,10 @@ mssty_iter_next_ts(struct mssty_iter * const iter, struct kv * const out)
   mssty_iter_skip1_ts(iter);
   return ret;
 }
-// end of ts iter
+// }}} ts
 
-// dup iter: return all versions, including old keys and tombstones
+// dup {{{
+// _dup iterator: return all versions, including old keys and tombstones
   struct kv *
 mssty_iter_peek_dup(struct mssty_iter * const iter, struct kv * const out)
 {
@@ -2439,7 +2400,143 @@ mssty_iter_kvref_dup(struct mssty_iter * const iter, struct kvref * const kvref)
   const u8 rank = iter->ssty->ranks[iter->kidx] & SSTY_RANK; // rank starts with 0
   return sst_iter_kvref(&(iter->iters[rank]), kvref);
 }
-// end of dup iter
+// }}} dup
+
+// point {{{
+// return the internal sst_iter if there is a match
+// when hide_ts == true, return NULL when the matching kv is a ts
+// when a non-NULL sst_iter is returned, the caller must park it after use
+  static struct sst_iter *
+mssty_iter_match(struct mssty_iter * const iter, const struct kref * const key, const bool hide_ts)
+{
+  struct ssty * const ssty = iter->ssty;
+  mssty_iter_park(iter);
+  iter->valid_bm = 0;
+  const u32 sidx = ssty_search_index(ssty, key);
+  if (unlikely(sidx >= ssty->inr1)) { // invalid
+    iter->kidx = ssty->nkidx;
+    return NULL;
+  }
+
+  iter->seek_ptrs = &(ssty->ptrs[sidx * ssty->nway]);
+
+  // local
+  const u32 aidx = sidx << SSTY_DBITS;
+  const u8 * const ranks = ssty->ranks + aidx;
+  const u32 rmax0 = ssty->nkidx - aidx;
+  const u32 rmax = rmax0 < SSTY_DIST ? rmax0 : SSTY_DIST;
+
+  if (ssty->tags) {
+    const u8 * const tags = ssty->tags + aidx;
+    u32 mask = ssty_tags_match_mask(tags, ranks, ssty_tag(key->hash32));
+    while (mask) {
+      const u32 i = (u32)__builtin_ctz(mask);
+      debug_assert((ranks[i] & SSTY_STALE) == 0);
+
+      // overflow
+      if (i >= rmax)
+        return NULL;
+
+      if ((!hide_ts) || ((ranks[i] & SSTY_TOMBSTONE) == 0)) {
+        struct sst_iter * const iter1 = mssty_iter_access(iter, ranks, i);
+        if (sst_iter_match_kref(iter1, key)) // the caller must park the iterx later
+          return iter1;
+
+        sst_iter_park(iter1);
+      }
+      mask &= (mask - 1);
+    }
+  } else {
+    const u32 r0 = (aidx + SSTY_DIST) > ssty->nkidx ? (ssty->nkidx - aidx) : SSTY_DIST;
+    const u32 i = mssty_iter_seek_bisect(iter, key, aidx, 0, r0);
+
+    // no match
+    if (i >= rmax)
+      return NULL;
+
+    debug_assert((ranks[i] & SSTY_STALE) == 0);
+    if ((!hide_ts) || ((ranks[i] & SSTY_TOMBSTONE) == 0)) {
+      struct sst_iter * const iter1 = mssty_iter_access(iter, ranks, i);
+      if (sst_iter_match_kref(iter1, key)) // the caller must park the iterx later
+        return iter1;
+
+      sst_iter_park(iter1);
+    }
+  }
+  return NULL;
+}
+
+  static struct kv *
+mssty_get_internal(struct mssty_ref * const ref, const struct kref * const key, struct kv * const out, const bool hide_ts)
+{
+  struct mssty_iter * const iter = (typeof(iter))ref;
+  struct sst_iter * const iter1 = mssty_iter_match(iter, key, hide_ts);
+  if (iter1) {
+    struct kv * const ret = sst_iter_peek(iter1, out);
+    sst_iter_park(iter1);
+    return ret;
+  } else {
+    return NULL;
+  }
+}
+
+  static bool
+mssty_probe_internal(struct mssty_ref * const ref, const struct kref * const key, const bool hide_ts)
+{
+  struct mssty_iter * const iter = (typeof(iter))ref;
+  struct sst_iter * const iter1 = mssty_iter_match(iter, key, hide_ts);
+  if (iter1) {
+    sst_iter_park(iter1);
+    return true;
+  } else {
+    return false;
+  }
+}
+
+// mssty_get can return tombstone
+  struct kv *
+mssty_get(struct mssty_ref * const ref, const struct kref * const key, struct kv * const out)
+{
+  return mssty_get_internal(ref, key, out, false);
+}
+
+// mssty_probe can return tombstone
+  bool
+mssty_probe(struct mssty_ref * const ref, const struct kref * const key)
+{
+  return mssty_probe_internal(ref, key, false);
+}
+
+// return NULL for tomestone
+  struct kv *
+mssty_get_ts(struct mssty_ref * const ref, const struct kref * const key, struct kv * const out)
+{
+  return mssty_get_internal(ref, key, out, true);
+}
+
+// return false for tomestone
+  bool
+mssty_probe_ts(struct mssty_ref * const ref, const struct kref * const key)
+{
+  return mssty_probe_internal(ref, key, true);
+}
+
+// return false for tomestone
+  bool
+mssty_get_value_ts(struct mssty_ref * const ref, const struct kref * const key,
+    void * const vbuf_out, u32 * const vlen_out)
+{
+  struct mssty_iter * const iter = (typeof(iter))ref;
+  struct sst_iter * const iter1 = mssty_iter_match(iter, key, true);
+  if (iter1) {
+    memcpy(vbuf_out, iter1->kvdata + iter1->klen, iter1->vlen);
+    *vlen_out = iter1->vlen;
+    sst_iter_park(iter1);
+    return true;
+  } else {
+    return false;
+  }
+}
 
   struct kv *
 mssty_first(struct msst * const msst, struct kv * const out)
@@ -2480,7 +2577,9 @@ mssty_last(struct msst * const msst, struct kv * const out)
   sst_iter_park(&iter1);
   return ret;
 }
+// }}} point
 
+// dump {{{
   void
 mssty_dump(struct msst * const msst, const char * const fn)
 {
@@ -2490,15 +2589,16 @@ mssty_dump(struct msst * const msst, const char * const fn)
   struct mssty_iter * const iter = mssty_iter_create(ref);
   struct ssty * const ssty = msst->ssty;
   const struct ssty_meta * const meta = ssty->meta;
-  dprintf(fd, "mssty seq%lu nway %u nkidx %u inr %u inr2 %u valid %u uniqx ",
-      msst->seq, ssty->nway, ssty->nkidx, ssty->inr, ssty->inr2, meta->valid);
+  dprintf(fd, "mssty seq%lu nway %u nkidx %u inr1 %u inr2 %u valid %u uniqx ",
+      msst->seq, ssty->nway, ssty->nkidx, ssty->inr1, ssty->inr2, meta->valid);
   for (u32 i = 0; i < ssty->nway; i++)
     dprintf(fd, "%u%c", meta->uniqx[i], (i == (ssty->nway-1)) ? '\n' : ' ');
 
   // print i2 keys
   const u32 n2 = ssty->inr2;
+  const u32 * const ioffs2 = (const u32 *)(ssty->mem + ssty->ioff2);
   for (u32 i = 0; i < n2; i++) {
-    const u32 ioff2 = ssty->ioffs2[i];
+    const u32 ioff2 = ioffs2[i];
     const u32 * const e2 = (typeof(e2))(ssty->mem + ioff2);
     const u8 * const a2 = (typeof(a2))(ssty->mem + ioff2 + sizeof(u32) + sizeof(u32));
     u32 klen = 0;
@@ -2527,6 +2627,8 @@ mssty_dump(struct msst * const msst, const char * const fn)
   fsync(fd);
   close(fd);
 }
+// }}} dump
+
 // }}} mssty
 
 // ssty_build {{{
@@ -2540,6 +2642,7 @@ struct ssty_build_info {
   u8 * ranks; // output: run selectors
   struct sst_ptr * ptrs; // output: cursor positions
   struct kv ** anchors; // output: anchors
+  u8 * tags; // output: hash tags
 
   int dfd; // input
   u32 way0;  // input: number of ssts to reuse in y0
@@ -2555,11 +2658,11 @@ static __thread u64 ssty_build_ckeys_reads = 0; // number of bytes
 // sstc_iter {{{
 struct sstc_iter {
   struct sst_iter iter;
-  u8 * buffer;
+  u8 * rawbuffer;
+  u8 * buffer; // rawbuffer + 8
   size_t bufsz;
   const u8 * cptr;
   const u8 * ckeysptr;
-  size_t ckeyssz;
 };
 
   static void
@@ -2570,10 +2673,11 @@ sstc_sync_kv(struct sstc_iter * const iter)
   ptr = vi128_decode_u32(ptr, &plen);
   ptr = vi128_decode_u32(ptr, &slen);
   const bool ts = *ptr++;
-  if ((plen + slen) > iter->bufsz) {
+  if ((plen + slen + sizeof(u64)) > iter->bufsz) {
     iter->bufsz = bits_p2_up_u32(plen + slen + 256);
-    iter->buffer = realloc(iter->buffer, iter->bufsz);
-    debug_assert(iter->buffer);
+    iter->rawbuffer = realloc(iter->rawbuffer, iter->bufsz);
+    iter->buffer = iter->rawbuffer + sizeof(u64);
+    debug_assert(iter->rawbuffer);
   }
   memcpy(iter->buffer + plen, ptr, slen);
 
@@ -2593,11 +2697,11 @@ sstc_iter_init(struct sstc_iter * const iter, struct sst * const sst, const u32 
 
   if (sst->nblks && meta->ckeyssz) {
     iter->bufsz = 256; // buffer size
-    iter->buffer = malloc(iter->bufsz);
+    iter->rawbuffer = malloc(iter->bufsz);
+    iter->buffer = iter->rawbuffer + sizeof(u64);
 
     const u8 * const ckeys = sst->mem + meta->ckeysoff;
     iter->ckeysptr = ckeys;
-    iter->ckeyssz = meta->ckeyssz;
     posix_madvise((void *)ckeys, meta->ckeyssz, POSIX_MADV_WILLNEED);
     iter->cptr = ckeys;
 
@@ -2695,10 +2799,13 @@ sstc_iter_compare(struct sstc_iter * const iter1, struct sstc_iter * const iter2
   static void
 sstc_iter_destroy(struct sstc_iter * const iter)
 {
-  if (iter->ckeysptr && iter->ckeyssz)
-    posix_madvise((void *)iter->ckeysptr, iter->ckeyssz, POSIX_MADV_DONTNEED);
+  if (iter->ckeysptr) {
+    const u32 ckeyssz = sst_meta(iter->iter.sst)->ckeyssz;
+    debug_assert(ckeyssz);
+    posix_madvise((void *)iter->ckeysptr, ckeyssz, POSIX_MADV_DONTNEED);
+  }
 
-  free(iter->buffer);
+  free(iter->rawbuffer);
   free(iter);
 }
 
@@ -2738,13 +2845,13 @@ msstb_use_ckeys(struct msst * const msstx1)
 // msstb {{{
 
 // msstb: a special kind of iterator structure for building ssty (REMIX)
-// There are three instantces of an msstb
-// An msstz-compaction always write new tables sequentially (a sorted view),
+// There are three instances of msstb
+// A msstz-compaction always write new tables sequentially (a sorted view),
 // and the existing data are already sorted (another sorted view).
 // both msstb2 and msstbc perform a two-way merge between the old and new data.
 // msstb2 uses the key-value data. It uses binary searches to find merge points.
 // msstbc uses the ckeys to perform a regular two-way merge.
-// msstbc is the most (I/O) efficient one.
+// msstbc is the most (I/O) efficient.
 
 // If the input data does not qualify for a two-way merge, msstbm should be used.
 // msstbm can be used to create ssty (REMIX) for any kind of inputs (e.g., overlapping).
@@ -2753,7 +2860,7 @@ msstb_use_ckeys(struct msst * const msstx1)
 // A rough comparison of speed: fast | msstbc > msstbm+ckeys <?> msstb2 > msstbm | slow
 
 struct msstb {
-  u32 rankenc; // the current rank
+  u32 rankenc; // the current rankenc (rank and flags)
   u32 idx; // index on the full sorted view
   u32 nway; // the target nway
   u32 way0; // <= y0->nway, the tables to reuse in the new ssty
@@ -2771,6 +2878,7 @@ struct msstb {
 
   struct msst * x1; // the input msstx
   struct msst * y0; // the old mssty
+  const u8 * tags0; // y0->ssty->tags
   struct miter * miter;
 
   struct kv * tmp0; // for bc
@@ -2790,8 +2898,9 @@ struct msstb {
 
 struct msstb_api {
   struct msstb * (*create)  (struct msst * const msstx1, struct msst * const mssty0, const u32 way0);
-  void (*ptrs)              (struct msstb * const b, struct sst_ptr * const ptrs_out);
-  struct kv * (*anchor)     (struct msstb * const b);
+  void (*ptrs)              (struct msstb * const b, struct sst_ptr * const ptrs_out); // dump cursor offsets
+  struct kv * (*anchor)     (struct msstb * const b); // create anchor key
+  u8 (*tag)                (struct msstb * const b); // calculate a 8-bit tag (the lowest 8-bits of crc32c)
   void (*skip1)             (struct msstb * const b);
   void (*destroy)           (struct msstb * const b);
 };
@@ -2805,7 +2914,7 @@ msstb_valid(struct msstb * const b)
   static inline u32
 msstb_rankenc(struct msstb * const b)
 {
-  return (u8)b->rankenc;
+  return b->rankenc;
 }
 // }}} msstb
 
@@ -2841,6 +2950,14 @@ msstbm_anchor(struct msstb * const b)
   debug_assert(alen <= b->tmp1->klen);
   struct kv * const anchor = kv_create(b->tmp1->kv, alen, NULL, 0); // key only
   return anchor;
+}
+
+  static u8
+msstbm_tag(struct msstb * const b)
+{
+  // no extra I/O for accessing the key
+  struct kv * const curr = b->tmp1;
+  return ssty_tag(kv_crc32c(curr->kv, curr->klen));
 }
 
   static void
@@ -2899,6 +3016,7 @@ static const struct msstb_api msstb_api_miter = {
   .create = msstbm_create,
   .ptrs = msstbm_ptrs,
   .anchor = msstbm_anchor,
+  .tag = msstbm_tag,
   .skip1 = msstbm_skip1,
   .destroy = msstbm_destroy,
 };
@@ -2993,6 +3111,23 @@ msstb2_anchor(struct msstb * const b)
   return anchor;
 }
 
+// used when (ckeys == false && tags == true)
+// The current implementation will have to read every key
+// This configuration is obsolete and should not be used
+// TODO: can be improved by reading u8 tags from y0
+  static u8
+msstb2_tag(struct msstb * const b)
+{
+  if (b->tags0 && ((b->rankenc & SSTY_RANK) < b->way0)) // tags0 && lo
+    return b->tags0[b->iter0.kidx];
+
+  struct kref curr = {};
+  sst_iter_kref(&b->newer, &curr);
+  const u32 hash32 = kv_crc32c(curr.ptr, curr.len);
+  sst_iter_park(&b->newer);
+  return ssty_tag(hash32);
+}
+
   static void
 msstb2_ptrs(struct msstb * const b, struct sst_ptr * const ptrs)
 {
@@ -3034,6 +3169,7 @@ msstb2_create_common(struct msst * const msstx1, struct msst * const mssty0, con
 
   b->x1 = msstx1;
   b->y0 = mssty0;
+  b->tags0 = mssty0 ? mssty0->ssty->tags : NULL;
   b->way0 = way0;
   b->way1 = way0; // new tables start with way0
   b->nway = msstx1->nway; // the target nway
@@ -3097,21 +3233,13 @@ static const struct msstb_api msstb_api_b2 = {
   .create = msstb2_create,
   .ptrs = msstb2_ptrs,
   .anchor = msstb2_anchor,
+  .tag = msstb2_tag,
   .skip1 = msstb2_skip1,
   .destroy = msstb2_destroy,
 };
 // }}} msstb2
 
 // msstbc {{{
-  static struct kv *
-msstbc_anchor(struct msstb * const b)
-{
-  const u32 alen = b->idx ? (kv_key_lcp(b->tmp0, b->tmp1)+1) : 0;
-  debug_assert(alen <= b->tmp1->klen);
-  struct kv * const anchor = kv_create(b->tmp1->kv, alen, NULL, 0); // key only
-  return anchor;
-}
-
   static void
 msstbc_ptrs(struct msstb * const b, struct sst_ptr * const ptrs)
 {
@@ -3144,17 +3272,17 @@ msstbc_sync_rank(struct msstb * const b)
     const u8 lorank = loenc & SSTY_RANK;
     debug_assert(lorank < b->way0);
     const int cmp = validhi ? sstc_iter_compare(b->citers[lorank], b->citers[b->way1]) : -1;
-    if (cmp < 0) {
+    if (cmp < 0) { // use lo
       b->rankenc = lorank;
       if (b->stale || (loenc & SSTY_STALE))
         b->rankenc |= SSTY_STALE;
-    } else {
+    } else { // use hi
       b->rankenc = b->way1;
       debug_assert(b->stale == false);
     }
     b->stale = cmp == 0;
   } else { // validlo == false
-    if (validhi) {
+    if (validhi) { // use hi
       b->rankenc = b->way1;
       //b->stale = false; // no need
     } else { // stop
@@ -3162,6 +3290,8 @@ msstbc_sync_rank(struct msstb * const b)
       return;
     }
   }
+
+  // check ts
   struct sstc_iter * const citer = b->citers[b->rankenc & SSTY_RANK];
   if (sstc_iter_ts(citer))
     b->rankenc |= SSTY_TOMBSTONE;
@@ -3178,6 +3308,17 @@ msstbc_sync_rank(struct msstb * const b)
       debug_die();
     }
   }
+}
+
+  static u8
+msstbc_tag(struct msstb * const b)
+{
+  if (b->tags0 && ((b->rankenc & SSTY_RANK) < b->way0)) // tags0 && lo
+    return b->tags0[b->kidx0];
+
+  // no extra I/O for accessing the key
+  struct kv * const curr = b->tmp1;
+  return ssty_tag(kv_crc32c(curr->kv, curr->klen));
 }
 
   static void
@@ -3226,7 +3367,8 @@ msstbc_destroy(struct msstb * const b)
 static const struct msstb_api msstb_api_bc = {
   .create = msstbc_create,
   .ptrs = msstbc_ptrs,
-  .anchor = msstbc_anchor,
+  .anchor = msstbm_anchor, // reuse msstbm_anchor
+  .tag = msstbc_tag,
   .skip1 = msstbc_skip1,
   .destroy = msstbc_destroy,
 };
@@ -3275,6 +3417,7 @@ ssty_build_sort_msstb(struct ssty_build_info * const bi)
 
   const u32 nway = bi->x1->nway;
   u8 * const ranks = bi->ranks;
+  u8 * const tags = bi->tags;
 
   struct sst_ptr * ptrs = bi->ptrs;
 
@@ -3298,6 +3441,9 @@ ssty_build_sort_msstb(struct ssty_build_info * const bi)
       const u32 gap = kidx1 - kidx0;
       memmove(&(ranks[kidx1]), &(ranks[kidx0]), gap); // move forward
       memset(&(ranks[kidx0]), SSTY_INVALID, gap); // fill with INVALID
+      if (tags)
+        memmove(&(tags[kidx1]), &(tags[kidx0]), gap); // move forward
+
       kidx0 += gap;
       kidx1 += gap;
     }
@@ -3308,6 +3454,8 @@ ssty_build_sort_msstb(struct ssty_build_info * const bi)
       ptrs += nway; // ptrs accepted
     }
     ranks[kidx1] = (u8)rankenc;
+    if (tags)
+      tags[kidx1] = api->tag(b);
     api->skip1(b);
     kidx1++;
   }
@@ -3321,10 +3469,19 @@ ssty_build_sort_msstb(struct ssty_build_info * const bi)
 // }}} sort
 
 // main {{{
+// layout
+// ranks: size0
+// tags: size1 at tagoff
+// ptrs: size2  at ptroff [inr1]
+// anchors: size3
+// ioffs: size4   at ioff1 [inr1]
+// ikeys2: size5
+// ioffs2: size6  at ioff2 [inr2]
+// meta
 // y0 and way0 are optional
   static u32
 ssty_build_at(const int dfd, struct msst * const msstx1,
-    const u64 seq, const u32 nway, struct msst * const mssty0, const u32 way0)
+    const u64 seq, const u32 nway, struct msst * const mssty0, const u32 way0, const bool gen_tags)
 {
   // open ssty file for output
   debug_assert(nway == msstx1->nway);
@@ -3350,8 +3507,12 @@ ssty_build_at(const int dfd, struct msst * const msstx1,
   struct kv ** const anchors = malloc(sizeof(*anchors) * maxsecs);
   debug_assert(ranks && ptrs && anchors);
 
-  struct ssty_build_info bi = {.x1 = msstx1, .y0 = mssty0, .dfd = dfd, .way0 = way0,
-    .ranks = ranks, .ptrs = ptrs, .anchors = anchors};
+  u8 * const tags = gen_tags ? malloc((maxkidx + 128) * sizeof(tags[0])) : NULL; // double size is enough
+  debug_assert(tags || (!gen_tags));
+
+  struct ssty_build_info bi = {.x1 = msstx1, .y0 = mssty0,
+    .ranks = ranks, .ptrs = ptrs, .anchors = anchors, .tags = tags,
+    .dfd = dfd, .way0 = way0};
 
   ssty_build_sort_msstb(&bi);
   debug_assert(bi.nkidx <= maxkidx);
@@ -3359,22 +3520,31 @@ ssty_build_at(const int dfd, struct msst * const msstx1,
   const u32 nkidx = bi.nkidx;
   const u32 nsecs = bi.nsecs;
   // write ranks // x16 for simd in seek_local
+  const u32 size0 = (u32)bits_round_up(sizeof(u8) * nkidx + 1, SSTY_DBITS);
   memset(&ranks[nkidx], (int)nway, sizeof(ranks[0]) * SSTY_DIST); // pad with nway (at least 1 byte, up to 16)
-  const u32 size1 = (u32)bits_round_up(sizeof(u8) * nkidx + 1, SSTY_DBITS);
-  write(fdout, bi.ranks, size1);
-  free(bi.ranks);
+  write(fdout, ranks, size0);
+  free(ranks);
+
+  const u32 size1 = tags ? (size0 * sizeof(tags[0])) : 0;
+  const u32 tagoff = tags ? size0 : 0;
+  if (tags) {
+    memset(&tags[nkidx], 0, sizeof(tags[0]) * SSTY_DIST); // pad with 0
+    write(fdout, tags, size1);
+    free(tags);
+  }
 
   //write level indicators and seek ptrs
+  const u32 ptroff = size0 + size1;
   const u32 size2 = (u32)(sizeof(struct sst_ptr) * nsecs * nway);
-  write(fdout, bi.ptrs, size2);
-  free(bi.ptrs);
+  write(fdout, ptrs, size2);
+  free(ptrs);
 
   // gen anchors
-  const u32 baseoff = size1 + size2;
+  const u32 baseoff1 = ptroff + size2;
   u32 * const ioffs = malloc(sizeof(*ioffs) * nsecs);
   struct kvenc * const aenc = kvenc_create();
   for (u64 i = 0; i < nsecs; i++) {
-    const u32 ioff = baseoff + kvenc_size(aenc);
+    const u32 ioff = baseoff1 + kvenc_size(aenc);
     ioffs[i] = ioff;
     const u32 klen = anchors[i]->klen;
     const u32 est = vi128_estimate_u32(klen) + klen;
@@ -3393,10 +3563,10 @@ ssty_build_at(const int dfd, struct msst * const msstx1,
   kvenc_reset(aenc);
   const u32 size4 = sizeof(*ioffs) * nsecs;
   write(fdout, ioffs, size4);
-  const u32 ioffsoff = baseoff + size3;
+  const u32 ioffsoff = baseoff1 + size3;
 
   // ikeys2
-  const u32 baseoff2 = size1+size2+size3+size4;
+  const u32 baseoff2 = ioffsoff + size4;
   const u32 pga = nsecs ? (ioffs[0] / PGSZ) : 0; // first pageno of index blocks
   const u32 pgz = nsecs ? (ioffs[nsecs-1] / PGSZ) : 0; // last pageno of index blocks
   const u32 ipages = nsecs ? (pgz - pga + 1) : 0; // totol number of pages of index blocks
@@ -3436,10 +3606,11 @@ ssty_build_at(const int dfd, struct msst * const msstx1,
   write(fdout, ioffs2, size6);
   free(ioffs2);
   const u32 ioffsoff2 = baseoff2 + size5;
+  const u32 metaoff = ioffsoff2 + size6;
 
   // ssty metadata
   struct ssty_meta meta = {
-    .nway = nway, .nkidx = nkidx, .ptroff = size1, .inr1 = nsecs,
+    .nway = nway, .nkidx = nkidx, .tagoff = tagoff, .ptroff = ptroff, .inr1 = nsecs,
     .ioff1 = ioffsoff, .inr2 = ipages, .ioff2 = ioffsoff2, .totkv = totkv,
     .totsz = (u32)totsz, .valid = bi.valid, .magic = magic,};
 
@@ -3450,7 +3621,8 @@ ssty_build_at(const int dfd, struct msst * const msstx1,
     meta.uniqx[i] = uniq;
   }
   const bool succ = write(fdout, &meta, sizeof(meta)) == sizeof(meta);
-  const size_t fsize = size1+size2+size3+size4+size5+size6+sizeof(meta);
+  const size_t fsize = metaoff + sizeof(meta);
+  debug_assert(fsize == (size0+size1+size2+size3+size4+size5+size6+sizeof(meta)));
   debug_assert(fsize < UINT32_MAX);
 
   // done
@@ -3461,12 +3633,12 @@ ssty_build_at(const int dfd, struct msst * const msstx1,
 
   u32
 ssty_build(const char * const dirname, struct msst * const msstx1,
-    const u64 seq, const u32 nway, struct msst * const mssty0, const u32 way0)
+    const u64 seq, const u32 nway, struct msst * const mssty0, const u32 way0, const bool tags)
 {
   const int dfd = open(dirname, O_RDONLY|O_DIRECTORY);
   if (dfd < 0)
     return 0;
-  const u32 ret = ssty_build_at(dfd, msstx1, seq, nway, mssty0, way0);
+  const u32 ret = ssty_build_at(dfd, msstx1, seq, nway, mssty0, way0, tags);
   close(dfd);
   return ret;
 }
@@ -3986,6 +4158,7 @@ msstv_fprint(struct msstv * const v, FILE * const out)
     struct msst * const msst = v->es[i].msst;
     debug_assert(v->rc == msst->rc);
     struct ssty * const ssty = msst->ssty;
+    ssty_fprint(ssty, out);
     const u64 magic = v->es[i].anchor->priv;
     fprintf(out, "%s [%3lu %6.3lu]", __func__, i, magic);
     for (u32 j = 0; j < ssty->nway; j++) {
@@ -4022,6 +4195,7 @@ struct msstz {
   u32 nway_major; // small
   u32 nway_minor; // large
   bool ckeys; // copy-keys
+  bool tags; // tags
   struct rcache * rc; // read-only cache
 
   double t0;
@@ -4064,7 +4238,7 @@ msstz_create_v0(const int dfd)
   if (!msst)
     return NULL;
 
-  if (!ssty_build_at(dfd, msst, 0, 0, NULL, 0)) {
+  if (!ssty_build_at(dfd, msst, 0, 0, NULL, 0, false)) {
     msstx_destroy(msst);
     return NULL;
   }
@@ -4085,7 +4259,7 @@ msstz_create_v0(const int dfd)
 }
 
   struct msstz *
-msstz_open(const char * const dirname, const u64 cache_size_mb, const bool ckeys)
+msstz_open(const char * const dirname, const u64 cache_size_mb, const bool ckeys, const bool tags)
 {
   // get the dir
   int dfd = open(dirname, O_RDONLY | O_DIRECTORY);
@@ -4135,6 +4309,7 @@ msstz_open(const char * const dirname, const u64 cache_size_mb, const bool ckeys
   z->nway_major = MSSTZ_NWAY_MAJOR; // fixed
   z->nway_minor = MSSTZ_NWAY_MINOR; // fixed
   z->ckeys = ckeys;
+  z->tags = tags;
   z->dfd = dfd;
 
   char logfn[80];
@@ -4450,7 +4625,7 @@ msstz_yq_consume(struct msstz_comp_info * const ci)
   //const u64 t0 = time_nsec();
   struct msst * const msst = msstx_open_at_reuse(z->dfd, task->seq1, task->way1, task->y0, task->way0);
   msst_rcache(msst, z->rc);
-  const u32 ysz = ssty_build_at(z->dfd, msst, task->seq1, task->way1, task->y0, task->way0);
+  const u32 ysz = ssty_build_at(z->dfd, msst, task->seq1, task->way1, task->y0, task->way0, z->tags);
   if (!ysz)
     debug_die();
   ci->stat_writes += ysz;
@@ -4922,7 +5097,7 @@ msstz_comp_worker(void * const ptr)
   struct msstz_comp_info * const ci = (typeof(ci))ptr;
   const u32 nco = ci->co_per_worker;
   if (nco > 1) {
-    struct coq * const coq = rcache_coq_create(nco << 2);
+    struct coq * const coq = coq_create_auto(nco << 1);
     coq_install(coq);
     u64 hostrsp = 0;
     for (u64 i = 0; i < nco; i++) {
@@ -4931,7 +5106,7 @@ msstz_comp_worker(void * const ptr)
     }
     coq_run(coq);
     coq_uninstall();
-    rcache_coq_destroy(coq);
+    coq_destroy_auto(coq);
   } else {
     msstz_comp_worker_func(ci);
   }

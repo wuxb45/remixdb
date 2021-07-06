@@ -19,7 +19,6 @@ static u8 * magics = NULL;
 u32 nths_update = 0;
 u32 nths_getscan = 0;
 
-static u64 epoch = 0;
 au64 all_seq;
 au64 all_stale;
 au64 all_found;
@@ -126,12 +125,17 @@ main(int argc, char** argv)
     printf("    WAL size = 2*mb\n");
     return 0;
   }
+  const u32 ncores = process_affinity_count();
+  if (ncores < 5) {
+    fprintf(stderr, "Need at least five cores on the cpu affinity list\n");
+    exit(0);
+  }
 
   const u64 memsz = a2u64(argv[2]);
   const u64 dpower = a2u64(argv[3]);
   const u64 upower = a2u64(argv[4]);
 
-  xdb = remixdb_open(argv[1], memsz, memsz);
+  xdb = remixdb_open(argv[1], memsz, memsz, true);
   if (!xdb) {
     fprintf(stderr, "xdb_open failed\n");
     return 0;
@@ -144,9 +148,9 @@ main(int argc, char** argv)
 
   min_stale = nkeys;
   magics = calloc(nkeys, 1);
-  nths_update = nths_getscan = process_affinity_count();
-  if (nths_update == 0)
-    debug_die();
+  nths_getscan = ncores - 4;
+  nths_update = ncores - 4;
+
   while (__builtin_popcount(nths_update) > 1)
     nths_update--;
   printf("write threads %u check threads %u\n", nths_update, nths_getscan);
@@ -154,15 +158,13 @@ main(int argc, char** argv)
   debug_assert(magics);
   const u32 ne = (argc < 6) ? 1000000 : a2u32(argv[5]);
 
-  for (u32 i = 0; i < ne; i++) {
-    epoch = i;
-
+  for (u32 e = 0; e < ne; e++) {
     all_seq = 0;
     const u64 dt = thread_fork_join(nths_update, update_worker, false, NULL);
-    if ((epoch & 0x3u) == 0x3u) { // close/open every 4 epochs
+    if ((e & 0x3u) == 0x3u) { // close/open every 4 epochs
       remixdb_close(xdb);
       // turn on/off ckeys alternatively, very stressful.
-      xdb = (epoch & 1) ? remixdb_open(argv[1], memsz, memsz) : remixdb_open_compact(argv[1], memsz, memsz);
+      xdb = (e & 4) ? remixdb_open(argv[1], memsz, memsz, (e & 8) != 0) : remixdb_open_compact(argv[1], memsz, memsz);
       if (xdb) {
         printf("reopen remixdb ok\n");
       } else {
@@ -178,8 +180,8 @@ main(int argc, char** argv)
     char ts[64];
     time_stamp(ts, sizeof(ts));
     const u64 nr = nupdate * nths_update;
-    printf("[%4lu] %s put/del nr %lu mops %.3lf keyrange %lu keycount %lu stale %lu\n",
-        epoch, ts, nr, (double)nr / (double)dt * 1e3, nkeys, all_found, all_stale);
+    printf("[%4u] %s put/del nr %lu mops %.3lf keyrange %lu keycount %lu stale %lu\n",
+        e, ts, nr, (double)nr / (double)dt * 1e3, nkeys, all_found, all_stale);
 
     if (all_stale > min_stale)
       debug_die();

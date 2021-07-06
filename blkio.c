@@ -440,6 +440,27 @@ coq_destroy(struct coq * const coq)
   free(coq);
 }
 
+  struct coq *
+coq_create_auto(const u32 depth)
+{
+#if defined(LIBURING)
+  return coq_uring_create_pair(depth);
+#else
+  (void)depth;
+  return coq_create();
+#endif // LIBURING
+}
+
+  void
+coq_destroy_auto(struct coq * const coq)
+{
+#if defined(LIBURING)
+  coq_uring_destroy_pair(coq);
+#else
+  coq_destroy(coq);
+#endif // LIBURING
+}
+
 // return the position in the queue
   u32
 corq_enqueue(struct coq * const q, struct co * const co)
@@ -836,27 +857,6 @@ rcache_destroy(struct rcache * const c)
   pages_unmap(c->mem, c->memsize);
   pages_unmap(c->groups, c->gmemsize);
   free(c);
-}
-
-  struct coq *
-rcache_coq_create(const u32 depth)
-{
-#if defined(LIBURING)
-  return coq_uring_create_pair(depth);
-#else
-  (void)depth;
-  return coq_create();
-#endif // LIBURING
-}
-
-  void
-rcache_coq_destroy(struct coq * const coq)
-{
-#if defined(LIBURING)
-  coq_uring_destroy_pair(coq);
-#else
-  coq_destroy(coq);
-#endif // LIBURING
 }
 
   static inline void

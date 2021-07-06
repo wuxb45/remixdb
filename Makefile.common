@@ -155,7 +155,7 @@ greentxt := $(shell $(TPUT) setaf 2)
 bluetxt := $(shell $(TPUT) setaf 4)
 normaltxt := $(shell $(TPUT) sgr0)
 
-.PHONY : bin dis clean cleanx check tags
+.PHONY : bin dis def clean cleanx check tags
 
 bin : $(BIN)
 dis : $(DIS) bin
@@ -196,6 +196,9 @@ endif
 
 %.s : %.c $(DEP) $$(DEP-$$@) $$(addsuffix .h,$$(HDR-$$@) $$(MOD-$$@))
 	$(CCC) $(CSTD) $(EXTRA) $(FLG) $(FLG-$*) $(FLG-$*.o) -S -o $@ -c $<
+
+def :
+	$(CCC) $(FLG) -dM -E - </dev/null
 
 clean :
 	rm -rf *.out *.dis *.o *.so *.gcda *.gcno *.gcov *.dSYM

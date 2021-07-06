@@ -4,6 +4,7 @@
  * All rights reserved. No warranty, explicit or implicit, provided.
  */
 #define _GNU_SOURCE
+
 #include <stdio.h>
 
 #include "lib.h"
@@ -17,7 +18,7 @@ main(int argc, char ** argv)
   (void)argv;
   // Use a small config for demo
   // In a moderate setup the recommended numbers are 4096 for both
-  struct xdb * const xdb = remixdb_open("./xdbdemo", 256, 256); // blockcache=256MB, MemTable=256MB
+  struct xdb * const xdb = remixdb_open("./xdbdemo", 256, 256, true); // blockcache=256MB, MemTable=256MB, use_tags=true
 
   // A ref is required to perform the following DB operations.
   // A thread should maintain a ref and keep using it.
