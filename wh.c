@@ -664,7 +664,7 @@ wormhole_kref_kv_match(const struct kref * const key, const struct kv * const cu
 }
 
   static inline void
-wormhole_qsbr_update_wait(struct wormref * const ref, const u64 v)
+wormhole_qsbr_update_pause(struct wormref * const ref, const u64 v)
 {
   qsbr_update(&ref->qref, v);
 #if defined(CORR)
@@ -1378,7 +1378,7 @@ wormhole_jump_leaf_read(struct wormref * const ref, const struct kref * const ke
       const u64 v1 = wormhmap_version_load(wormhmap_load(map));
       if (wormleaf_version_load(leaf) > v)
         break;
-      wormhole_qsbr_update_wait(ref, v1);
+      wormhole_qsbr_update_pause(ref, v1);
     } while (true);
   } while (true);
 }
@@ -1406,7 +1406,7 @@ wormhole_jump_leaf_write(struct wormref * const ref, const struct kref * const k
       const u64 v1 = wormhmap_version_load(wormhmap_load(map));
       if (wormleaf_version_load(leaf) > v)
         break;
-      wormhole_qsbr_update_wait(ref, v1);
+      wormhole_qsbr_update_pause(ref, v1);
     } while (true);
   } while (true);
 }
