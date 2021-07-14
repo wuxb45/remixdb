@@ -91,6 +91,7 @@ class XdbRef:
     # use xdb.ref()
     def __init__(self, xdbptr):
         self.refptr = libxdb.remixdb_ref(xdbptr)
+        self.vbuf = create_string_buffer(65500)
 
     # user must call explicitly
     def unref(self):
@@ -111,12 +112,11 @@ class XdbRef:
     # return the value as a python object
     def get(self, key):
         binkey = key.encode()
-        vbuf = create_string_buffer(1024) # TODO: must be large enough
         vlen = c_uint()
-        ret = libxdb.remixdb_get(self.refptr, binkey, len(binkey), vbuf, byref(vlen))
+        ret = libxdb.remixdb_get(self.refptr, binkey, len(binkey), self.vbuf, byref(vlen))
         if ret:
             #vbuf[vlen.value] = b'\x00'
-            return msgpack.unpackb(vbuf.value)
+            return msgpack.unpackb(self.vbuf.value)
         else:
             return None
 
@@ -134,6 +134,8 @@ class XdbRef:
 class XdbIter:
     def __init__(self, refptr):
         self.iptr = libxdb.remixdb_iter_create(refptr)
+        self.kbuf = create_string_buffer(65500)
+        self.vbuf = create_string_buffer(65500)
 
     # user must call explicitly
     def destroy(self):
@@ -157,14 +159,12 @@ class XdbIter:
 
     # return (key, value) pair or None
     def peek(self):
-        kbuf = create_string_buffer(1024) # TODO: must be large enough
-        vbuf = create_string_buffer(1024) # TODO: must be large enough
         klen = c_uint()
         vlen = c_uint()
-        if libxdb.remixdb_iter_peek(self.iptr, kbuf, byref(klen), vbuf, byref(vlen)):
+        if libxdb.remixdb_iter_peek(self.iptr, self.kbuf, byref(klen), self.vbuf, byref(vlen)):
             #kbuf[klen.value] = b'\x00'
             #vbuf[vlen.value] = b'\x00'
-            return (kbuf.value.decode(), klen.value, msgpack.unpackb(vbuf.value), vlen.value)
+            return (self.kbuf.value.decode(), klen.value, msgpack.unpackb(self.vbuf.value), vlen.value)
         else:
             return None
 
