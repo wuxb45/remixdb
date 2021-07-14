@@ -8,7 +8,17 @@ It compiles on recent Linux/FreeBSD/MacOS and supports x86\_64 and AArch64 CPUs.
 
 This code repository is being actively maintained and contains optimizations beyong the original RemixDB implementation.
 
-# Optimization 1: Minimizing REMIX (Re-)Building Cost
+# News
+
+* An experimental Python API is available in `xdb.py`. See the end of `xdb.py` for examples.
+
+* RemixDB now provides `xdb_merge` for atomic read-modify-write operations.
+
+* Two optimizations have been added to boost compaction and point query performance (see below).
+
+# Optimizations
+
+## Optimization 1: Minimizing REMIX (Re-)Building Cost
 
 This implementation employs an optimization to minimize the REMIX building cost.
 This optimization improves the throughput by 2x (0.96MOPS vs. 0.50MOPS) in a random-write experiment, compared to the implementation described in the REMIX paper.
@@ -35,7 +45,7 @@ You should use `remixdb_open` unless it's absolutely necessary to save a little 
 `remixdb_open_compact` opens a remixdb with the optimization turned off. Each newly created sstable will not contain a CKB.
 A store created by one of these functions can be safely opened by the other function.
 
-# Optimization 2: Improving Point Query with Hash Tags
+## Optimization 2: Improving Point Query with Hash Tags
 
 A point query in the original RemixDB performs binary search in a segment, which takes about five key comparisons and can cost multiple I/Os.
 The current implementation provides a new option, named `tags` (the last argument of `remixdb_open`).
