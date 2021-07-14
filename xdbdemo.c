@@ -27,11 +27,11 @@ main(int argc, char ** argv)
 
   bool r;
 
-  r = remixdb_set(ref, "remix", 5, "easy", 4);
-  printf("remixdb_set remix easy %c\n", r?'T':'F');
+  r = remixdb_put(ref, "remix", 5, "easy", 4);
+  printf("remixdb_put remix easy %c\n", r?'T':'F');
 
-  r = remixdb_set(ref, "time_travel", 11, "impossible", 10);
-  printf("remixdb_set time_travel impossible %c\n", r?'T':'F');
+  r = remixdb_put(ref, "time_travel", 11, "impossible", 10);
+  printf("remixdb_put time_travel impossible %c\n", r?'T':'F');
 
   r = remixdb_del(ref, "time_travel", 11);
   printf("remixdb_del time_travel %c\n", r?'T':'F');
@@ -47,9 +47,9 @@ main(int argc, char ** argv)
   printf("remixdb_get remix %c %u %.*s\n", r?'T':'F', vlen_out, vlen_out, vbuf_out);
 
   // prepare a few keys for range ops
-  remixdb_set(ref, "00", 2, "0_value", 7);
-  remixdb_set(ref, "11", 2, "1_value", 7);
-  remixdb_set(ref, "22", 2, "2_value", 7);
+  remixdb_put(ref, "00", 2, "0_value", 7);
+  remixdb_put(ref, "11", 2, "1_value", 7);
+  remixdb_put(ref, "22", 2, "2_value", 7);
 
   // Make all the data persistent in the log.
   // Performing sync is expensive.

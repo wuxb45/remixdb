@@ -28,7 +28,7 @@ wormhole_get(struct wormref * const ref, const struct kref * const key, struct k
 wormhole_probe(struct wormref * const ref, const struct kref * const key);
 
   extern bool
-wormhole_set(struct wormref * const ref, struct kv * const kv);
+wormhole_put(struct wormref * const ref, struct kv * const kv);
 
   extern bool
 wormhole_merge(struct wormref * const ref, const struct kref * const kref,
@@ -119,7 +119,7 @@ whsafe_get(struct wormref * const ref, const struct kref * const key, struct kv 
 whsafe_probe(struct wormref * const ref, const struct kref * const key);
 
   extern bool
-whsafe_set(struct wormref * const ref, struct kv * const kv);
+whsafe_put(struct wormref * const ref, struct kv * const kv);
 
   extern bool
 whsafe_merge(struct wormref * const ref, const struct kref * const kref,
@@ -176,7 +176,7 @@ whunsafe_get(struct wormhole * const map, const struct kref * const key, struct 
 whunsafe_probe(struct wormhole * const map, const struct kref * const key);
 
   extern bool
-whunsafe_set(struct wormhole * const map, struct kv * const kv);
+whunsafe_put(struct wormhole * const map, struct kv * const kv);
 
   extern bool
 whunsafe_merge(struct wormhole * const map, const struct kref * const kref,

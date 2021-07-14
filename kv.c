@@ -903,10 +903,10 @@ kvmap_kv_probe(const struct kvmap_api * const api, void * const ref,
 }
 
   inline bool
-kvmap_kv_set(const struct kvmap_api * const api, void * const ref,
+kvmap_kv_put(const struct kvmap_api * const api, void * const ref,
     struct kv * const kv)
 {
-  return api->set(ref, kv);
+  return api->put(ref, kv);
 }
 
   inline bool

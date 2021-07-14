@@ -207,13 +207,13 @@ typedef void        (* kvmap_mm_free_func)(struct kv * kv, void * priv);
 // manage internal kv data of kvmap
 struct kvmap_mm {
   // to create a private copy of "kv"
-  // see set() functions
+  // see put() functions
   kvmap_mm_in_func in;
   // to duplicate a private copy of "kv" to "out"
   // see get() and iter_peek() functions
   kvmap_mm_out_func out;
   // to free a kv
-  // see del() and set() functions
+  // see del() and put() functions
   kvmap_mm_free_func free;
   void * priv;
 };
@@ -335,16 +335,16 @@ struct kvmap_api {
   bool hashkey; // true: caller needs to provide correct hash in kv/kref
   bool ordered; // true: has iter_seek
   bool threadsafe; // true: support thread_safe access
-  bool readonly; // true: no set() and del()
+  bool readonly; // true: no put() and del()
   bool irefsafe; // true: iter's kref/kvref can be safely accessed after iter_seek/iter_skip/iter_park
   bool unique; // provide unique keys, especially for iterators
   bool refpark; // ref has park() and resume()
   bool async; // XXX for testing KVell
 
-  // set (aka put/upsert): return true on success; false on error
+  // put (aka put/upsert): return true on success; false on error
   // mm.in() controls how things move into the kvmap; the default mm make a copy with malloc()
   // mm.free() controls how old kv get disposed when replaced
-  bool        (* set)     (void * const ref, struct kv * const kv);
+  bool        (* put)     (void * const ref, struct kv * const kv);
   // get: search and return a kv if found, or NULL if not
   // with the default mm: malloc() if out == NULL; otherwise, use out as buffer
   // with custom kvmap_mm: mm.out() controls buffer; use with caution
@@ -360,7 +360,7 @@ struct kvmap_api {
   // Note that in inpw() you can only change the value.
   bool        (* inpr)    (void * const ref, const struct kref * const key, kv_inp_func uf, void * const priv);
   bool        (* inpw)    (void * const ref, const struct kref * const key, kv_inp_func uf, void * const priv);
-  // merge: set+callback on old/new keys; another name: read-modify-write
+  // merge: put+callback on old/new keys; another name: read-modify-write
   // return true if successfull; return false on error
   bool        (* merge)   (void * const ref, const struct kref * const key, kv_merge_func uf, void * const priv);
   // delete-range: delete all keys from start (inclusive) to end (exclusive)
@@ -467,7 +467,7 @@ kvmap_kv_probe(const struct kvmap_api * const api, void * const ref,
     const struct kv * const key);
 
   extern bool
-kvmap_kv_set(const struct kvmap_api * const api, void * const ref,
+kvmap_kv_put(const struct kvmap_api * const api, void * const ref,
     struct kv * const kv);
 
   extern bool

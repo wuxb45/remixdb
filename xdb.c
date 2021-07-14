@@ -982,7 +982,7 @@ xdb_probe(struct xdb_ref * const ref, const struct kref * const kref)
 }
 // }}} get probe
 
-// set del {{{
+// put del {{{
 // this is so long
   static void
 xdb_write_enter(struct xdb_ref * const ref)
@@ -1047,7 +1047,7 @@ xdb_update(struct xdb_ref * const ref, const struct kref * const kref, struct kv
 }
 
   bool
-xdb_set(struct xdb_ref * const ref, const struct kv * const kv)
+xdb_put(struct xdb_ref * const ref, const struct kv * const kv)
 {
   struct kv * const newkv = xdb_dup_kv(kv);
   if (!newkv)
@@ -1076,7 +1076,7 @@ xdb_sync(struct xdb_ref * const ref)
   wal_flush_sync_wait(&xdb->wal);
   xdb_unlock(xdb);
 }
-// }}} set del
+// }}} put del
 
 // merge {{{
 // caller needs to free the returned kv
@@ -1334,7 +1334,7 @@ const struct kvmap_api kvmap_api_xdb = {
   .unique = true,
   .get = (void*)xdb_get,
   .probe = (void*)xdb_probe,
-  .set = (void*)xdb_set,
+  .put = (void*)xdb_put,
   .del = (void*)xdb_del,
   .merge = (void*)xdb_merge,
   .sync = (void*)xdb_sync,
@@ -1432,7 +1432,7 @@ remixdb_close(struct xdb * const xdb)
 }
 
   bool
-remixdb_set(struct xdb_ref * const ref, const void * const kbuf, const u32 klen,
+remixdb_put(struct xdb_ref * const ref, const void * const kbuf, const u32 klen,
     const void * const vbuf, const u32 vlen)
 {
   // TODO: huge kvs should be stored in separate fileswith indirections inserted in xdb

@@ -69,7 +69,7 @@ To avoid the performance penalty, one should use `numactl` to specify the cpu af
 ```
 $ numactl -C 0,2,4,6,8 ./xdbdemo.out    # compaction threads on 2,4,6,8
 
-$ numactl -C 0,2,4,6,8,10,12,14 ./xdbtest.out 256 18 18 100    # user threads on 0,2,4,6; compaction threads on 8,10,12,14
+$ numactl -C 0,2,4,6,8,10,12,14 ./xdbtest.out 256 256 18 18 100    # user threads on 0,2,4,6; compaction threads on 8,10,12,14
 ```
 
 The worker threads affinity can also be explicitly specified using `xdb_open`.
@@ -124,11 +124,11 @@ Suppose you have eight cores (0...7) in total, the best practice is to let the t
 Run with a 4GB block cache, 4GB MemTables, and a dataset with 32 million KVs (2^25), performing 1 million updates in each round (2^20):
 
     $ make M=j xdbtest.out
-    $ numactl -N 0 ./xdbtest.out /tmp/xdbtest 4096 25 20 100
+    $ numactl -N 0 ./xdbtest.out /tmp/xdbtest 4096 4096 25 20 100
 
 To run with smaller memory footprint (a 256MB block cache, 256MB Memtables, and 1 million KVs):
 
-    $ numactl -N 0 ./xdbtest.out /tmp/xdbtest 256 20 20 100
+    $ numactl -N 0 ./xdbtest.out /tmp/xdbtest 256 256 20 20 100
 
 This setup consumes up to 850MB memory (RSS) and 1.8GB space in /tmp/xdbtest.
 

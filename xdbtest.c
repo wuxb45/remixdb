@@ -51,7 +51,7 @@ update_worker(void * const ptr)
       remixdb_del(ref, ktmp, 16);
     } else { // update
       const u32 vlen = ((i & 0x3fffu) != 0x1357u) ? (((u32)r & 0xf0) + 100) : ((((u32)r & 0xf0) << 6) + 4200);
-      remixdb_set(ref, ktmp, 16, vtmp, vlen);
+      remixdb_put(ref, ktmp, 16, vtmp, vlen);
     }
   }
 
@@ -119,23 +119,24 @@ getscan_worker(void * const ptr)
   int
 main(int argc, char** argv)
 {
-  if (argc < 5) {
-    printf("Usage: <dirname> <mem-mb> <data-power> <update-power> [<epochs>]\n");
-    printf("    Block cache and MemTable(s) will use <mem-mb>; the actual usage can be 3*mb\n");
-    printf("    WAL size = 2*mb\n");
+  if (argc < 6) {
+    printf("Usage: <dirname> <cache-mb> <mt-mb> <data-power> <update-power> [<epochs>]\n");
+    printf("    WAL size = <mt-mb>*2\n");
     return 0;
   }
+
   const u32 ncores = process_affinity_count();
   if (ncores < 5) {
     fprintf(stderr, "Need at least five cores on the cpu affinity list\n");
     exit(0);
   }
 
-  const u64 memsz = a2u64(argv[2]);
-  const u64 dpower = a2u64(argv[3]);
-  const u64 upower = a2u64(argv[4]);
+  const u64 cachesz = a2u64(argv[2]);
+  const u64 mtsz = a2u64(argv[3]);
+  const u64 dpower = a2u64(argv[4]);
+  const u64 upower = a2u64(argv[5]);
 
-  xdb = remixdb_open(argv[1], memsz, memsz, true);
+  xdb = remixdb_open(argv[1], cachesz, mtsz, true);
   if (!xdb) {
     fprintf(stderr, "xdb_open failed\n");
     return 0;
@@ -156,7 +157,7 @@ main(int argc, char** argv)
   printf("write threads %u check threads %u\n", nths_update, nths_getscan);
 
   debug_assert(magics);
-  const u32 ne = (argc < 6) ? 1000000 : a2u32(argv[5]);
+  const u32 ne = (argc < 7) ? 1000000 : a2u32(argv[6]);
 
   for (u32 e = 0; e < ne; e++) {
     all_seq = 0;
@@ -164,7 +165,7 @@ main(int argc, char** argv)
     if ((e & 0x3u) == 0x3u) { // close/open every 4 epochs
       remixdb_close(xdb);
       // turn on/off ckeys alternatively, very stressful.
-      xdb = (e & 4) ? remixdb_open(argv[1], memsz, memsz, (e & 8) != 0) : remixdb_open_compact(argv[1], memsz, memsz);
+      xdb = (e & 4) ? remixdb_open(argv[1], cachesz, mtsz, (e & 8) != 0) : remixdb_open_compact(argv[1], cachesz, mtsz);
       if (xdb) {
         printf("reopen remixdb ok\n");
       } else {

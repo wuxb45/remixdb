@@ -3,7 +3,7 @@
 -K remixdb_close
 -K remixdb_ref
 -K remixdb_unref
--K remixdb_set
+-K remixdb_put
 -K remixdb_del
 -K remixdb_get
 -K remixdb_probe

@@ -64,7 +64,7 @@ main(int argc, char** argv)
 #define NEW ((100000))
   for (u64 i = 0; i < NEW; i++) {
     strdec_64(key, count + i);
-    remixdb_set(ref, key, 20, value, 1024);
+    remixdb_put(ref, key, 20, value, 1024);
   }
   printf("insert [%lu, %lu]; now exit()\n", count, count + NEW - 1);
   remixdb_sync(ref);

@@ -38,7 +38,7 @@ xdb_get(struct xdb_ref * const ref, const struct kref * const kref, struct kv * 
 xdb_probe(struct xdb_ref * const ref, const struct kref * const kref);
 
   extern bool
-xdb_set(struct xdb_ref * const ref, const struct kv * const kv);
+xdb_put(struct xdb_ref * const ref, const struct kv * const kv);
 
   extern bool
 xdb_del(struct xdb_ref * const ref, const struct kref * const kref);
@@ -51,9 +51,9 @@ xdb_sync(struct xdb_ref * const ref);
 // uf() can be invoked multiple times due to abort and retry (these are not errors)
 // The last invocation will take the actual effect if it is successful
 // The returned kvs will be ignored except for the last one (returned by the last call to uf)
-// Mempry allocated by uf must be freed by the caller after xdb_merge has returned
+// Memory allocated by uf must be freed by the caller after xdb_merge has returned
 // The uf can perform in-place update if kv0 is not NULL (just return kv0 from uf())
-// An in-place update may still cause an memtable insertion if kv0 was not from the memtable (from a partition)
+// An in-place update may still cause an memtable insertion if kv0 was not from the memtable (loaded from a partition)
   extern bool
 xdb_merge(struct xdb_ref * const ref, const struct kref * const kref, kv_merge_func uf, void * const priv);
 
@@ -111,7 +111,7 @@ remixdb_unref(struct xdb_ref * const ref);
 remixdb_close(struct xdb * const xdb);
 
   extern bool
-remixdb_set(struct xdb_ref * const ref, const void * const kbuf, const u32 klen,
+remixdb_put(struct xdb_ref * const ref, const void * const kbuf, const u32 klen,
     const void * const vbuf, const u32 vlen);
 
   extern bool
