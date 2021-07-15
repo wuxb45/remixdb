@@ -27,7 +27,6 @@ libxdb.remixdb_ref.restype = c_void_p
 
 # unref
 libxdb.remixdb_unref.argtypes = [c_void_p]
-libxdb.remixdb_unref.restype = c_void_p
 
 # put
 # xdbptr, keyptr, keylen, vptr, vlen -> bool
@@ -162,7 +161,7 @@ class XdbIter:
         klen = c_uint()
         vlen = c_uint()
         if libxdb.remixdb_iter_peek(self.iptr, self.kbuf, byref(klen), self.vbuf, byref(vlen)):
-            #kbuf[klen.value] = b'\x00'
+            self.kbuf[klen.value] = b'\x00'
             #vbuf[vlen.value] = b'\x00'
             return (self.kbuf.value.decode(), klen.value, msgpack.unpackb(self.vbuf.value), vlen.value)
         else:
