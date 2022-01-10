@@ -2059,27 +2059,51 @@ wormhole_split_cut_search1(struct wormleaf * const leaf, u32 l, u32 h, const u32
   return h;
 }
 
-// move some keys from leaf1 to leaf2
-// leaf1 must be sorted
   static void
-wormhole_split_leaf_move(struct wormleaf * const leaf1, struct wormleaf * const leaf2, const u32 cut)
+wormhole_split_leaf_move1(struct wormleaf * const leaf1, struct wormleaf * const leaf2,
+    const u32 cut, const u32 is1, const struct kv * const new)
 {
   const u32 nr_keys = leaf1->nr_keys;
-
-  // insert into leaf2 in sorted order
-  for (u32 i = cut; i < nr_keys; i++)
-    wormleaf_insert_e13(leaf2, leaf1->hs[leaf1->ss[i]]);
-  leaf2->nr_sorted = nr_keys - cut;
-
-  // empty and reinsert into leaf1
+  const struct entry13 e1 = entry13(wormhole_pkey(new->hashlo), ptr_to_u64(new));
   struct entry13 es[WH_KPN];
-  for (u32 i = 0; i < cut; i++)
-    es[i] = leaf1->hs[leaf1->ss[i]];
+
+  if (cut <= is1) { // e1 goes to leaf2
+    // leaf2
+    for (u32 i = cut; i < is1; i++)
+      wormleaf_insert_e13(leaf2, leaf1->hs[leaf1->ss[i]]);
+
+    wormleaf_insert_e13(leaf2, e1);
+
+    for (u32 i = is1; i < nr_keys; i++)
+      wormleaf_insert_e13(leaf2, leaf1->hs[leaf1->ss[i]]);
+
+    // leaf1
+    for (u32 i = 0; i < cut; i++)
+      es[i] = leaf1->hs[leaf1->ss[i]];
+
+  } else { // e1 goes to leaf1
+    // leaf2
+    for (u32 i = cut - 1; i < nr_keys; i++)
+      wormleaf_insert_e13(leaf2, leaf1->hs[leaf1->ss[i]]);
+
+    // leaf1
+    for (u32 i = 0; i < is1; i++)
+      es[i] = leaf1->hs[leaf1->ss[i]];
+
+    es[is1] = e1;
+
+    for (u32 i = is1 + 1; i < cut; i++)
+      es[i] = leaf1->hs[leaf1->ss[i - 1]];
+  }
+
+  leaf2->nr_sorted = leaf2->nr_keys;
+
   memset(leaf1->hs, 0, sizeof(leaf1->hs[0]) * WH_KPN);
   leaf1->nr_keys = 0;
   for (u32 i = 0; i < cut; i++)
     wormleaf_insert_e13(leaf1, es[i]);
   leaf1->nr_sorted = cut;
+  debug_assert((leaf1->nr_sorted + leaf2->nr_sorted) == (nr_keys + 1));
 }
 
 // create an anchor for leaf-split
@@ -2124,8 +2148,11 @@ wormhole_split_leaf(struct wormhole * const map, struct wormleaf * const leaf1, 
   }
 
   // split_hmap will unlock the leaf nodes; must move now
-  wormhole_split_leaf_move(leaf1, leaf2, (cut <= is1) ? cut : (cut - 1));
-  wormleaf_insert((cut <= is1) ? leaf2 : leaf1, new);
+  wormhole_split_leaf_move1(leaf1, leaf2, cut, is1, new);
+  // leaf1 and leaf2 should be sorted after split
+  debug_assert(leaf1->nr_keys == leaf1->nr_sorted);
+  debug_assert(leaf2->nr_keys == leaf2->nr_sorted);
+
   return leaf2;
 }
 // }}} leaf-split
