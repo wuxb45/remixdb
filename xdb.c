@@ -1091,7 +1091,8 @@ xdb_merge_get_old(struct xdb_ref * const ref, const struct kref * const kref)
   }
   // not in log, maybe in ssts
   struct kv * const ret = msstv_get_ts(ref->vref, kref, NULL);
-  ret->hash = kv_crc32c_extend(kref->hash32);
+  if (ret)
+    ret->hash = kv_crc32c_extend(kref->hash32);
   return ret;
 }
 
