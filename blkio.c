@@ -289,7 +289,7 @@ wring_fsync(struct wring * const wring)
 #if defined(LIBURING)
   struct io_uring_sqe * const sqe = io_uring_get_sqe(&wring->uring);
   io_uring_prep_fsync(sqe, wring->fd, IORING_FSYNC_DATASYNC);
-  //io_uring_sqe_set_data(sqe, NULL); // NULL by prep
+  io_uring_sqe_set_data(sqe, NULL);
   wring->pending++;
   wring->nring++;
   wring_submit(wring); // just submit
